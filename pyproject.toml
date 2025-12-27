@@ -17,6 +17,12 @@ dependencies = [
     "opencv-python>=4.8.0",
 ]
 
+[project.optional-dependencies]
+apple = [
+    "pyobjc-framework-Vision>=10.0",
+    "pyobjc-framework-Quartz>=10.0",
+]
+
 [project.scripts]
 fairwaycut = "fairwaycut.cli:main"
 
