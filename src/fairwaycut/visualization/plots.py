@@ -6,9 +6,10 @@ from typing import Optional
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
+import librosa
 
-from fairwaycut.audio import AudioData, get_waveform_times
-from fairwaycut.detection import DetectionResult
+from fairwaycut.core.models import AudioData, DetectionResult
+from fairwaycut.audio.extraction import get_waveform_times
 
 
 # Style configuration
@@ -161,8 +162,6 @@ def plot_analysis(
     Returns:
         Matplotlib Figure object.
     """
-    import librosa
-    
     apply_style()
 
     fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
@@ -221,7 +220,6 @@ def plot_analysis(
     spectral_flux = np.concatenate([[0], spectral_flux])
     flux_times = librosa.frames_to_time(np.arange(len(spectral_flux)), sr=audio.sample_rate, hop_length=hop_length)
     
-    # Color for spectral flux
     FLUX_COLOR = "#00d9ff"
     
     axes[2].plot(flux_times, spectral_flux, color=FLUX_COLOR, linewidth=0.8, alpha=0.9)
@@ -230,7 +228,6 @@ def plot_analysis(
     # Mark peaks on spectral flux
     if result.events:
         peak_times = [e.timestamp for e in result.events]
-        # Find flux values at peak times
         peak_flux_values = []
         for pt in peak_times:
             idx = np.argmin(np.abs(flux_times - pt))
