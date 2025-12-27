@@ -294,3 +294,6 @@ dist
 .yarn/install-state.gz
 .pnp.*
 
+#output and samples
+output/
+samples/
