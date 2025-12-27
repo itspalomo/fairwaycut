@@ -1,0 +1,33 @@
+[project]
+name = "fairwaycut"
+version = "0.1.0"
+description = "Golf swing auto-segmentation CLI - detect and extract individual swings from driving range videos"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "librosa>=0.10.2",
+    "numpy>=1.26.0",
+    "matplotlib>=3.8.0",
+    "moviepy>=1.0.3",
+    "scipy>=1.12.0",
+    "click>=8.1.7",
+    "soundfile>=0.12.1",
+]
+
+[project.scripts]
+fairwaycut = "fairwaycut.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fairwaycut"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.3.0",
+]
+
