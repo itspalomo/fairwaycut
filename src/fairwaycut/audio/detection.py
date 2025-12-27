@@ -1,59 +1,12 @@
 """Impact event detection for golf swing analysis."""
 
-from dataclasses import dataclass
-
 import numpy as np
 from scipy.signal import find_peaks
+from scipy.ndimage import median_filter
 import librosa
 
-from fairwaycut.audio import AudioData, compute_envelope
-
-
-@dataclass
-class ImpactEvent:
-    """A detected impact event."""
-
-    timestamp: float  # Time in seconds
-    confidence: float  # Confidence score (0-1)
-    amplitude_db: float  # Peak amplitude in dB
-    onset_strength: float = 0.0  # Onset/attack strength
-    spectral_flux: float = 0.0  # Spectral change rate
-    is_transient: bool = True  # Whether this appears to be a true transient
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            "timestamp": round(self.timestamp, 3),
-            "confidence": round(self.confidence, 3),
-            "amplitude_db": round(self.amplitude_db, 2),
-            "onset_strength": round(self.onset_strength, 2),
-            "spectral_flux": round(self.spectral_flux, 2),
-            "is_transient": bool(self.is_transient),
-        }
-
-
-@dataclass
-class DetectionResult:
-    """Result of impact detection."""
-
-    events: list[ImpactEvent]
-    parameters: dict
-    envelope: np.ndarray
-    envelope_times: np.ndarray
-    envelope_db: np.ndarray
-
-    @property
-    def timestamps(self) -> list[float]:
-        """Return list of event timestamps."""
-        return [e.timestamp for e in self.events]
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            "events": [e.to_dict() for e in self.events],
-            "parameters": self.parameters,
-            "num_events": len(self.events),
-        }
+from fairwaycut.core.models import AudioData, ImpactEvent, DetectionResult
+from fairwaycut.audio.extraction import compute_envelope
 
 
 def detect_impacts(
@@ -99,10 +52,8 @@ def detect_impacts(
     peak_heights = properties.get("peak_heights", envelope_db[peaks])
 
     # Compute confidence scores based on prominence and height
-    # Normalize to 0-1 range
     if len(peaks) > 0:
         prominences = properties.get("prominences", np.ones(len(peaks)) * prominence_db)
-        # Confidence based on both height (louder = more confident) and prominence
         height_scores = (peak_heights - threshold_db) / (-threshold_db) 
         prominence_scores = prominences / (prominence_db * 2)
         confidence_scores = np.clip((height_scores + prominence_scores) / 2, 0, 1)
@@ -119,7 +70,7 @@ def detect_impacts(
         )
         events.append(event)
 
-    # Sort by timestamp (should already be sorted, but ensure determinism)
+    # Sort by timestamp
     events.sort(key=lambda e: e.timestamp)
 
     parameters = {
@@ -196,7 +147,6 @@ def detect_impacts_adaptive(
     # Compute confidence scores
     if len(peaks) > 0:
         prominences = properties.get("prominences", np.ones(len(peaks)) * prominence_db)
-        # Confidence based on how far above threshold and prominence
         height_scores = (peak_heights - threshold_db) / (-threshold_db) if threshold_db < 0 else np.ones(len(peaks))
         prominence_scores = prominences / (prominence_db * 2)
         confidence_scores = np.clip((height_scores + prominence_scores) / 2, 0, 1)
@@ -271,11 +221,10 @@ def detect_impacts_transient(
         hop_length=hop_length,
     )
     
-    # Compute spectral flux - this is our PRIMARY detection signal
-    # Ball impacts cause dramatic spectral changes
+    # Compute spectral flux - PRIMARY detection signal
     spec = np.abs(librosa.stft(audio.samples, hop_length=hop_length))
     spectral_flux = np.sqrt(np.mean(np.diff(spec, axis=1)**2, axis=0))
-    spectral_flux = np.concatenate([[0], spectral_flux])  # Pad to match onset length
+    spectral_flux = np.concatenate([[0], spectral_flux])
     
     # Ensure same length
     min_len = min(len(onset_env), len(spectral_flux))
@@ -294,7 +243,6 @@ def detect_impacts_transient(
     min_distance_frames = int(min_gap_sec * audio.sample_rate / hop_length)
     
     # Use spectral flux as PRIMARY detection signal
-    # Ball impacts have very high spectral flux (frequency content changes dramatically)
     peaks_flux, props_flux = find_peaks(
         spectral_flux,
         height=spectral_flux_threshold,
@@ -309,20 +257,16 @@ def detect_impacts_transient(
         peak_flux = spectral_flux[peak_idx]
         peak_amplitude_db = rms_db[peak_idx] if peak_idx < len(rms_db) else -50
         
-        # Check criteria - spectral flux is primary, onset validates it's truly impulsive
+        # Check criteria
         passes_flux = peak_flux >= spectral_flux_threshold
-        passes_onset = peak_onset >= onset_threshold * 0.5  # Minimum onset to filter sustained sounds
+        passes_onset = peak_onset >= onset_threshold * 0.5
         passes_amplitude = peak_amplitude_db >= amplitude_threshold_db
         
-        # Must have high spectral flux AND reasonable amplitude AND some onset attack
-        # The onset filter removes motor/cart noise that can have spectral flux
         if passes_flux and passes_amplitude and passes_onset:
-            # Confidence based on how strongly it passes each criterion
             flux_score = min(1.0, peak_flux / (spectral_flux_threshold * 3))
             onset_score = min(1.0, peak_onset / (onset_threshold * 2)) if passes_onset else 0.3
             amp_score = min(1.0, (peak_amplitude_db - amplitude_threshold_db) / 12)
             
-            # Weight spectral flux most heavily
             confidence = flux_score * 0.5 + onset_score * 0.2 + amp_score * 0.3
             
             event = ImpactEvent(
@@ -348,7 +292,7 @@ def detect_impacts_transient(
         "method": "transient_flux",
     }
     
-    # For compatibility, also compute standard envelope
+    # For compatibility, compute standard envelope
     envelope, env_times = compute_envelope(audio, frame_length=512, hop_length=hop_length)
     envelope_db = librosa.amplitude_to_db(envelope, ref=np.max(envelope))
     
@@ -368,7 +312,7 @@ def detect_impacts_adaptive_snr(
     snr_threshold: float = 2.5,
     local_window_sec: float = 10.0,
     min_flux: float = 0.8,
-    min_onset: float = 0.5,  # Lowered to catch hits in noisy sections
+    min_onset: float = 0.5,
     amplitude_threshold_db: float = -15.0,
 ) -> DetectionResult:
     """
@@ -390,8 +334,6 @@ def detect_impacts_adaptive_snr(
     Returns:
         DetectionResult containing detected events and analysis data.
     """
-    from scipy.ndimage import median_filter
-    
     # Compute onset strength envelope
     onset_env = librosa.onset.onset_strength(
         y=audio.samples,
@@ -420,12 +362,11 @@ def detect_impacts_adaptive_snr(
     # Compute local background using rolling median
     window_frames = int(local_window_sec * audio.sample_rate / hop_length)
     if window_frames % 2 == 0:
-        window_frames += 1  # Ensure odd window for median filter
+        window_frames += 1
     
     local_background = median_filter(spectral_flux, size=window_frames, mode='reflect')
     
     # Compute local SNR
-    # Add small epsilon to avoid division by zero
     snr = spectral_flux / (local_background + 1e-6)
     
     # Calculate minimum distance between peaks in frames
@@ -449,30 +390,24 @@ def detect_impacts_adaptive_snr(
         local_bg = local_background[peak_idx]
         
         # Adaptive onset threshold based on noise level
-        # In noisy sections (high background), relax onset requirement
-        # In quiet sections (low background), require higher onset
-        quiet_threshold = 0.2  # Background below this is "quiet"
-        noisy_threshold = 0.4  # Background above this is "noisy"
+        quiet_threshold = 0.2
+        noisy_threshold = 0.4
         
         if local_bg < quiet_threshold:
-            # Quiet section: require strong onset to filter out one-off noise
             adaptive_onset = max(min_onset, 1.5)
         elif local_bg > noisy_threshold:
-            # Noisy section: relax onset since ball machine masks transients
             adaptive_onset = min_onset
         else:
-            # Transition zone: interpolate
             t = (local_bg - quiet_threshold) / (noisy_threshold - quiet_threshold)
             adaptive_onset = 1.5 * (1 - t) + min_onset * t
         
         # Check criteria
         passes_snr = peak_snr >= snr_threshold
-        passes_min_flux = peak_flux >= min_flux  # Absolute minimum
+        passes_min_flux = peak_flux >= min_flux
         passes_onset = peak_onset >= adaptive_onset
         passes_amplitude = peak_amplitude_db >= amplitude_threshold_db
         
         if passes_snr and passes_min_flux and passes_onset and passes_amplitude:
-            # Confidence based on SNR (how much it exceeds local background)
             snr_score = min(1.0, (peak_snr - snr_threshold) / (snr_threshold * 2))
             onset_score = min(1.0, peak_onset / 6.0)
             amp_score = min(1.0, (peak_amplitude_db - amplitude_threshold_db) / 15)
@@ -504,7 +439,7 @@ def detect_impacts_adaptive_snr(
         "method": "adaptive_snr",
     }
     
-    # For compatibility, also compute standard envelope
+    # For compatibility, compute standard envelope
     envelope, env_times = compute_envelope(audio, frame_length=512, hop_length=hop_length)
     envelope_db = librosa.amplitude_to_db(envelope, ref=np.max(envelope))
     

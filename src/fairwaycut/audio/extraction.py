@@ -2,26 +2,12 @@
 
 import tempfile
 from pathlib import Path
-from dataclasses import dataclass
 
 import numpy as np
 import librosa
 from moviepy import VideoFileClip
 
-
-@dataclass
-class AudioData:
-    """Container for extracted audio data."""
-
-    samples: np.ndarray
-    sample_rate: int
-    duration: float
-    source_file: str
-
-    @property
-    def num_samples(self) -> int:
-        """Return the number of audio samples."""
-        return len(self.samples)
+from fairwaycut.core.models import AudioData
 
 
 def extract_audio_from_video(video_path: str | Path) -> AudioData:
@@ -179,4 +165,66 @@ def get_waveform_times(audio: AudioData) -> np.ndarray:
         Array of timestamps in seconds for each sample.
     """
     return np.linspace(0, audio.duration, len(audio.samples))
+
+
+def compute_spectral_flux(
+    audio: AudioData,
+    hop_length: int = 256,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute spectral flux of the audio signal.
+    
+    Spectral flux measures the rate of change of the spectrum,
+    which is useful for detecting transient events like ball impacts.
+
+    Args:
+        audio: AudioData containing the audio samples.
+        hop_length: Number of samples between successive frames.
+
+    Returns:
+        Tuple of (spectral_flux, times) arrays.
+    """
+    spec = np.abs(librosa.stft(audio.samples, hop_length=hop_length))
+    spectral_flux = np.sqrt(np.mean(np.diff(spec, axis=1)**2, axis=0))
+    spectral_flux = np.concatenate([[0], spectral_flux])
+    
+    times = librosa.frames_to_time(
+        np.arange(len(spectral_flux)),
+        sr=audio.sample_rate,
+        hop_length=hop_length,
+    )
+    
+    return spectral_flux, times
+
+
+def compute_onset_strength(
+    audio: AudioData,
+    hop_length: int = 256,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute onset strength envelope.
+    
+    Onset strength indicates how likely a given frame is to be 
+    the start of a musical/audio event.
+
+    Args:
+        audio: AudioData containing the audio samples.
+        hop_length: Number of samples between successive frames.
+
+    Returns:
+        Tuple of (onset_envelope, times) arrays.
+    """
+    onset_env = librosa.onset.onset_strength(
+        y=audio.samples,
+        sr=audio.sample_rate,
+        hop_length=hop_length,
+    )
+    
+    times = librosa.frames_to_time(
+        np.arange(len(onset_env)),
+        sr=audio.sample_rate,
+        hop_length=hop_length,
+    )
+    
+    return onset_env, times
 
