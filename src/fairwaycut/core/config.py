@@ -101,6 +101,102 @@ class FusionConfig:
     post_impact_sec: float = 2.0  # Time after impact to include
 
 
+class VisualizationStyle(Enum):
+    """Visualization style presets for skeleton rendering.
+    
+    MINIMAL: Clean glow skeleton, no trails - fast rendering
+    STANDARD: Glow + short trails + phase-aware colors
+    CINEMATIC: Full effects with long trails, depth coloring, particles
+    LEGACY: Basic lines and circles (no glow effects) - fastest
+    """
+    MINIMAL = "minimal"
+    STANDARD = "standard"
+    CINEMATIC = "cinematic"
+    LEGACY = "legacy"
+
+
+@dataclass
+class VisualizationConfig:
+    """Configuration for skeleton visualization effects."""
+    
+    # Style preset
+    style: VisualizationStyle = VisualizationStyle.STANDARD
+    
+    # Glow settings
+    enable_glow: bool = True
+    glow_intensity: float = 1.0  # 0.5-2.0 multiplier
+    
+    # Motion trails
+    enable_trails: bool = True
+    trail_length: int = 12  # Number of frames to show
+    trail_landmarks: list[int] = None  # Default: wrists [15, 16]
+    
+    # Depth coloring
+    enable_depth_coloring: bool = False
+    near_color: tuple[int, int, int] = (0, 100, 255)   # Warm BGR (close)
+    far_color: tuple[int, int, int] = (255, 100, 0)    # Cool BGR (far)
+    
+    # Velocity effects
+    enable_velocity_intensity: bool = True
+    
+    # Phase colors
+    enable_phase_colors: bool = True
+    
+    # Joint styling
+    joint_style: str = "circle"  # "circle", "diamond", "hexagon"
+    
+    # Bone styling
+    bone_style: str = "line"  # "line", "capsule"
+    
+    # Impact effects
+    enable_impact_particles: bool = True
+    
+    def __post_init__(self):
+        if self.trail_landmarks is None:
+            self.trail_landmarks = [15, 16]  # Wrists
+    
+    @classmethod
+    def from_style(cls, style: VisualizationStyle) -> "VisualizationConfig":
+        """Create config from a preset style."""
+        if style == VisualizationStyle.LEGACY:
+            return cls(
+                style=style,
+                enable_glow=False,
+                enable_trails=False,
+                enable_depth_coloring=False,
+                enable_velocity_intensity=False,
+                enable_phase_colors=False,
+                enable_impact_particles=False,
+            )
+        elif style == VisualizationStyle.MINIMAL:
+            return cls(
+                style=style,
+                enable_glow=True,
+                enable_trails=False,
+                enable_depth_coloring=False,
+                enable_velocity_intensity=False,
+                enable_phase_colors=True,
+                joint_style="circle",
+                bone_style="line",
+            )
+        elif style == VisualizationStyle.CINEMATIC:
+            return cls(
+                style=style,
+                enable_glow=True,
+                glow_intensity=1.2,
+                enable_trails=True,
+                trail_length=18,
+                enable_depth_coloring=True,
+                enable_velocity_intensity=True,
+                enable_phase_colors=True,
+                joint_style="diamond",
+                bone_style="capsule",
+                enable_impact_particles=True,
+            )
+        else:  # STANDARD
+            return cls(style=style)
+
+
 @dataclass
 class VideoConfig:
     """Configuration for video generation."""
@@ -115,6 +211,10 @@ class VideoConfig:
     skeleton_thickness: int = 2
     landmark_radius: int = 4
     
+    # Enhanced visualization
+    visualization_style: VisualizationStyle = VisualizationStyle.STANDARD
+    visualization_config: VisualizationConfig = None
+    
     # Audio waveform overlay
     waveform_height: int = 80
     waveform_color: tuple[int, int, int] = (78, 204, 163)  # Teal
@@ -123,6 +223,12 @@ class VideoConfig:
     # Phase label
     phase_font_scale: float = 1.0
     phase_color: tuple[int, int, int] = (255, 255, 255)
+    
+    def __post_init__(self):
+        if self.visualization_config is None:
+            self.visualization_config = VisualizationConfig.from_style(
+                self.visualization_style
+            )
 
 
 @dataclass

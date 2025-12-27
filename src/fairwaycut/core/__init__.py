@@ -8,15 +8,25 @@ from fairwaycut.core.models import (
     SwingPhase,
     DetectionResult,
 )
-from fairwaycut.core.config import Config
+from fairwaycut.core.config import (
+    Config,
+    VideoConfig,
+    VisualizationConfig,
+    VisualizationStyle,
+)
 
 __all__ = [
+    # Models
     "AudioData",
     "FramePose",
     "ImpactEvent",
     "SwingEvent",
     "SwingPhase",
     "DetectionResult",
+    # Config
     "Config",
+    "VideoConfig",
+    "VisualizationConfig",
+    "VisualizationStyle",
 ]
 

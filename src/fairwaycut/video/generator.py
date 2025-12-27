@@ -1,6 +1,6 @@
 """Demo video generation with pose and audio overlays."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable
 import cv2
@@ -24,6 +24,11 @@ from fairwaycut.video.overlays import (
     draw_impact_marker,
     draw_timestamp,
     draw_confidence_bar,
+    # New enhanced skeleton rendering
+    SkeletonRenderer,
+    SkeletonRendererOptions,
+    RenderMode,
+    ColorTheme,
 )
 from fairwaycut.pose.swing_phases import SwingPhasesResult
 
@@ -44,11 +49,16 @@ class DemoVideoOptions:
     waveform_height: int = 80
     waveform_window_sec: float = 5.0
     
-    # Skeleton settings
+    # Skeleton settings (legacy - used if use_enhanced_skeleton is False)
     skeleton_color: tuple[int, int, int] = (0, 255, 128)
     skeleton_thickness: int = 2
     landmark_radius: int = 4
     golf_mode: bool = True
+    
+    # Enhanced skeleton settings
+    use_enhanced_skeleton: bool = True
+    skeleton_render_mode: RenderMode = field(default=RenderMode.STANDARD)
+    skeleton_renderer_options: Optional[SkeletonRendererOptions] = None
     
     # Output settings
     output_fps: Optional[float] = None  # None = match input
@@ -62,7 +72,7 @@ class DemoVideoGenerator:
     
     This class takes a source video and fusion results to create
     a new video with visual overlays showing:
-    - Pose skeleton
+    - Pose skeleton (with optional enhanced neon glow effects)
     - Audio waveform with impact markers
     - Current swing phase label
     - Impact flash indicator
@@ -89,6 +99,22 @@ class DemoVideoGenerator:
             self.options.skeleton_color = config.skeleton_color
             self.options.skeleton_thickness = config.skeleton_thickness
             self.options.landmark_radius = config.landmark_radius
+        
+        # Initialize enhanced skeleton renderer
+        self._skeleton_renderer: Optional[SkeletonRenderer] = None
+        if self.options.use_enhanced_skeleton:
+            if self.options.skeleton_renderer_options:
+                renderer_opts = self.options.skeleton_renderer_options
+            else:
+                renderer_opts = SkeletonRendererOptions.from_mode(
+                    self.options.skeleton_render_mode
+                )
+                # Apply legacy options for compatibility
+                renderer_opts.thickness = self.options.skeleton_thickness
+                renderer_opts.joint_radius = self.options.landmark_radius
+                renderer_opts.golf_mode = self.options.golf_mode
+            
+            self._skeleton_renderer = SkeletonRenderer(options=renderer_opts)
     
     def generate(
         self,
@@ -147,6 +173,10 @@ class DemoVideoGenerator:
             raise ValueError(f"Could not create output video: {output_path}")
         
         try:
+            # Reset skeleton renderer for fresh history
+            if self._skeleton_renderer:
+                self._skeleton_renderer.reset()
+            
             # Get pose data if available
             pose_result = fusion_result.pose_result
             audio_result = fusion_result.audio_result
@@ -236,18 +266,29 @@ class DemoVideoGenerator:
         
         # Draw skeleton
         if self.options.show_skeleton and pose and pose.is_valid:
-            frame = draw_pose_skeleton(
-                frame,
-                pose,
-                color=self.options.skeleton_color,
-                thickness=self.options.skeleton_thickness,
-                landmark_radius=self.options.landmark_radius,
-                golf_mode=self.options.golf_mode,
-            )
+            if self._skeleton_renderer and self.options.use_enhanced_skeleton:
+                # Use enhanced skeleton renderer with glow effects
+                frame = self._skeleton_renderer.render(
+                    frame,
+                    pose,
+                    phase=phase,
+                    is_impact=is_impact,
+                )
+            else:
+                # Fall back to legacy basic skeleton
+                frame = draw_pose_skeleton(
+                    frame,
+                    pose,
+                    color=self.options.skeleton_color,
+                    thickness=self.options.skeleton_thickness,
+                    landmark_radius=self.options.landmark_radius,
+                    golf_mode=self.options.golf_mode,
+                )
         
-        # Draw impact marker
+        # Draw impact marker (only for legacy mode, enhanced has built-in)
         if self.options.show_impact_marker and is_impact:
-            frame = draw_impact_marker(frame, is_impact)
+            if not self.options.use_enhanced_skeleton:
+                frame = draw_impact_marker(frame, is_impact)
         
         # Draw phase label
         if self.options.show_phase_label:
@@ -366,6 +407,10 @@ class DemoVideoGenerator:
         )
         
         try:
+            # Reset skeleton renderer for fresh history
+            if self._skeleton_renderer:
+                self._skeleton_renderer.reset()
+            
             # Get audio segment
             audio_segment = audio.get_segment(swing.start_time, swing.end_time)
             
