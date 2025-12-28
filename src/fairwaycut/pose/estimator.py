@@ -1,142 +1,102 @@
-"""MediaPipe Pose estimation wrapper for golf swing analysis.
+"""Pose estimation wrapper for golf swing analysis.
+
+This module provides a unified interface for pose estimation, automatically
+selecting the best available backend for the current platform:
+
+- macOS: Apple Vision Framework (hardware-accelerated via Neural Engine)
+- Other platforms: MediaPipe (CPU-based, cross-platform)
 
 Performance Notes:
-- MediaPipe Python on macOS does NOT support GPU acceleration (Metal/CoreML)
-- Processing speed on CPU is typically 3-10 FPS depending on model complexity
+- Apple Vision on macOS: 30-60+ FPS on Apple Silicon
+- MediaPipe CPU: 3-10 FPS depending on model complexity
 - For long videos, use process_every_n > 1 or segment-based processing
-- The lite model (complexity=0) is ~3x faster than full model
-
-Optimization strategies implemented:
-1. Use lite model (complexity=0) for speed, full (1) for accuracy
-2. Skip frames with process_every_n parameter
-3. Resize frames to lower resolution before processing
-4. Process only around detected audio impacts instead of full video
 """
 
 from pathlib import Path
 from typing import Optional, Callable
-import cv2
-import numpy as np
-import urllib.request
-import os
 
-try:
-    import mediapipe as mp
-    from mediapipe.tasks import python
-    from mediapipe.tasks.python import vision
-    MEDIAPIPE_AVAILABLE = True
-except ImportError:
-    MEDIAPIPE_AVAILABLE = False
-
-from fairwaycut.core.models import FramePose, Landmark, PoseAnalysisResult
-
-
-# Model URLs - lite is ~3x faster, full is more accurate
-POSE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task"
-POSE_MODEL_LITE_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
-POSE_MODEL_FULL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task"
-
-
-def get_model_path(model_complexity: int = 1) -> Path:
-    """Get the path to the pose landmarker model, downloading if necessary."""
-    cache_dir = Path.home() / ".cache" / "fairwaycut" / "models"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Select model based on complexity
-    if model_complexity == 0:
-        url = POSE_MODEL_LITE_URL
-        filename = "pose_landmarker_lite.task"
-    elif model_complexity == 2:
-        url = POSE_MODEL_URL  # Heavy model
-        filename = "pose_landmarker_heavy.task"
-    else:
-        url = POSE_MODEL_FULL_URL
-        filename = "pose_landmarker_full.task"
-    
-    model_path = cache_dir / filename
-    
-    if not model_path.exists():
-        print(f"Downloading pose model to {model_path}...")
-        urllib.request.urlretrieve(url, model_path)
-        print("Download complete.")
-    
-    return model_path
+from fairwaycut.core.models import FramePose, PoseAnalysisResult
+from fairwaycut.pose.backends import (
+    PoseBackend,
+    create_backend,
+    get_available_backends,
+)
 
 
 class PoseEstimator:
     """
-    Wrapper for MediaPipe Pose estimation optimized for golf swing analysis.
+    Unified pose estimation interface for golf swing analysis.
     
-    This class processes video files frame-by-frame and extracts pose landmarks
-    that can be used for swing phase detection and motion analysis.
+    This class automatically selects the best available pose estimation
+    backend for the current platform, providing hardware acceleration
+    on macOS via Apple Vision while falling back to MediaPipe elsewhere.
     
-    Performance tips:
-    - Use model_complexity=0 (lite) for ~3x faster processing
-    - Use max_frame_size to resize large frames before processing
-    - Use process_every_n to skip frames (interpolate for smooth overlays)
-    - Process only segments around detected impacts, not full video
+    The API remains consistent regardless of which backend is used.
+    
+    Example:
+        # Auto-select best backend for platform
+        with PoseEstimator() as estimator:
+            result = estimator.process_video("swing.mp4")
+        
+        # Force a specific backend
+        with PoseEstimator(backend="mediapipe") as estimator:
+            result = estimator.process_video("swing.mp4")
     """
     
     def __init__(
         self,
-        model_complexity: int = 0,  # Default to lite for speed
+        backend: Optional[str] = None,
+        prefer_native: bool = True,
+        # Common options
+        max_frame_size: int = 640,
+        min_confidence: float = 0.5,
+        # MediaPipe-specific options (ignored by Apple Vision)
+        model_complexity: int = 0,
         min_detection_confidence: float = 0.5,
         min_tracking_confidence: float = 0.5,
-        enable_segmentation: bool = False,
-        max_frame_size: int = 640,  # Resize frames for faster processing
     ):
         """
-        Initialize the pose estimator.
+        Initialize the pose estimator with automatic backend selection.
         
         Args:
-            model_complexity: 0 (lite/fast), 1 (full), or 2 (heavy/accurate).
-            min_detection_confidence: Minimum confidence for initial detection.
-            min_tracking_confidence: Minimum confidence for landmark tracking.
-            enable_segmentation: Whether to output segmentation mask.
+            backend: Explicitly request a backend ("apple_vision" or "mediapipe").
+                    If None, automatically selects the best available backend.
+            prefer_native: If True, prefer platform-native backends.
             max_frame_size: Maximum frame dimension (resizes larger frames).
+            min_confidence: Minimum confidence threshold for landmarks (Apple Vision).
+            model_complexity: MediaPipe model complexity (0=lite, 1=full, 2=heavy).
+            min_detection_confidence: MediaPipe detection confidence threshold.
+            min_tracking_confidence: MediaPipe tracking confidence threshold.
         """
-        if not MEDIAPIPE_AVAILABLE:
-            raise ImportError(
-                "MediaPipe is not installed. Install with: pip install mediapipe"
-            )
-        
-        self.model_complexity = model_complexity
-        self.min_detection_confidence = min_detection_confidence
-        self.min_tracking_confidence = min_tracking_confidence
-        self.enable_segmentation = enable_segmentation
-        self.max_frame_size = max_frame_size
-        
-        # Get model path (downloads if needed)
-        model_path = get_model_path(model_complexity)
-        
-        # Initialize MediaPipe Pose Landmarker with new Tasks API
-        base_options = python.BaseOptions(model_asset_path=str(model_path))
-        options = vision.PoseLandmarkerOptions(
-            base_options=base_options,
-            running_mode=vision.RunningMode.VIDEO,
-            min_pose_detection_confidence=min_detection_confidence,
+        # Create the backend - factory filters kwargs automatically
+        self._backend = create_backend(
+            prefer_native=prefer_native,
+            backend_name=backend,
+            max_frame_size=max_frame_size,
+            min_confidence=min_confidence,
+            model_complexity=model_complexity,
+            min_detection_confidence=min_detection_confidence,
             min_tracking_confidence=min_tracking_confidence,
-            output_segmentation_masks=enable_segmentation,
-            num_poses=1,  # Only detect one person for golf
         )
-        self.landmarker = vision.PoseLandmarker.create_from_options(options)
     
-    def _resize_frame(self, frame: np.ndarray) -> np.ndarray:
-        """Resize frame if larger than max_frame_size for faster processing."""
-        h, w = frame.shape[:2]
-        max_dim = max(h, w)
-        
-        if max_dim <= self.max_frame_size:
-            return frame
-        
-        scale = self.max_frame_size / max_dim
-        new_w = int(w * scale)
-        new_h = int(h * scale)
-        return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    @property
+    def backend_name(self) -> str:
+        """Return the name of the active backend."""
+        return self._backend.name
+    
+    @property
+    def num_landmarks(self) -> int:
+        """Return the number of landmarks produced by the active backend."""
+        return self._backend.num_landmarks
+    
+    @property
+    def supports_gpu(self) -> bool:
+        """Return True if the active backend uses GPU/hardware acceleration."""
+        return self._backend.supports_gpu
     
     def process_frame(
         self,
-        frame: np.ndarray,
+        frame,
         frame_index: int,
         timestamp: float,
     ) -> FramePose:
@@ -151,45 +111,7 @@ class PoseEstimator:
         Returns:
             FramePose with extracted landmarks (normalized 0-1 coordinates).
         """
-        # Resize for faster processing
-        resized = self._resize_frame(frame)
-        
-        # Convert BGR to RGB for MediaPipe
-        rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        
-        # Create MediaPipe Image
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-        
-        # Process the frame (timestamp in milliseconds)
-        timestamp_ms = int(timestamp * 1000)
-        results = self.landmarker.detect_for_video(mp_image, timestamp_ms)
-        
-        landmarks = []
-        confidence = 0.0
-        
-        if results.pose_landmarks and len(results.pose_landmarks) > 0:
-            # Get first detected pose
-            pose_landmarks = results.pose_landmarks[0]
-            
-            # Extract all 33 landmarks (coordinates are normalized 0-1)
-            for lm in pose_landmarks:
-                landmarks.append(Landmark(
-                    x=lm.x,
-                    y=lm.y,
-                    z=lm.z,
-                    visibility=lm.visibility if hasattr(lm, 'visibility') else 1.0,
-                ))
-            
-            # Calculate overall confidence as average visibility
-            visibilities = [lm.visibility for lm in landmarks]
-            confidence = float(np.mean(visibilities))
-        
-        return FramePose(
-            frame_index=frame_index,
-            timestamp=timestamp,
-            landmarks=landmarks,
-            confidence=confidence,
-        )
+        return self._backend.process_frame(frame, frame_index, timestamp)
     
     def process_video(
         self,
@@ -214,68 +136,11 @@ class PoseEstimator:
             FileNotFoundError: If video file doesn't exist.
             ValueError: If video cannot be opened.
         """
-        video_path = Path(video_path)
-        
-        if not video_path.exists():
-            raise FileNotFoundError(f"Video file not found: {video_path}")
-        
-        cap = cv2.VideoCapture(str(video_path))
-        
-        if not cap.isOpened():
-            raise ValueError(f"Could not open video: {video_path}")
-        
-        # Get video properties
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration = total_frames / fps if fps > 0 else 0
-        
-        if max_frames:
-            total_frames = min(total_frames, max_frames)
-        
-        frames: list[FramePose] = []
-        frame_index = 0
-        
-        try:
-            while cap.isOpened():
-                ret, frame = cap.read()
-                
-                if not ret:
-                    break
-                
-                if max_frames and frame_index >= max_frames:
-                    break
-                
-                # Calculate timestamp
-                timestamp = frame_index / fps if fps > 0 else 0
-                
-                # Process frame (or skip if using process_every_n)
-                if frame_index % process_every_n == 0:
-                    pose = self.process_frame(frame, frame_index, timestamp)
-                    frames.append(pose)
-                else:
-                    # Create empty placeholder for skipped frames
-                    frames.append(FramePose(
-                        frame_index=frame_index,
-                        timestamp=timestamp,
-                        landmarks=[],
-                        confidence=0.0,
-                    ))
-                
-                # Progress callback
-                if progress_callback and frame_index % 30 == 0:
-                    progress_callback(frame_index, total_frames)
-                
-                frame_index += 1
-        
-        finally:
-            cap.release()
-        
-        return PoseAnalysisResult(
-            frames=frames,
-            fps=fps,
-            total_frames=len(frames),
-            video_duration=duration,
-            source_file=str(video_path),
+        return self._backend.process_video(
+            video_path,
+            progress_callback=progress_callback,
+            process_every_n=process_every_n,
+            max_frames=max_frames,
         )
     
     def process_video_segment(
@@ -297,65 +162,16 @@ class PoseEstimator:
         Returns:
             PoseAnalysisResult for the segment.
         """
-        video_path = Path(video_path)
-        
-        if not video_path.exists():
-            raise FileNotFoundError(f"Video file not found: {video_path}")
-        
-        cap = cv2.VideoCapture(str(video_path))
-        
-        if not cap.isOpened():
-            raise ValueError(f"Could not open video: {video_path}")
-        
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        
-        # Calculate frame range
-        start_frame = int(start_time * fps)
-        end_frame = int(end_time * fps)
-        
-        # Seek to start frame
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        
-        frames: list[FramePose] = []
-        frame_index = start_frame
-        
-        try:
-            while cap.isOpened() and frame_index < end_frame:
-                ret, frame = cap.read()
-                
-                if not ret:
-                    break
-                
-                timestamp = frame_index / fps if fps > 0 else 0
-                
-                if (frame_index - start_frame) % process_every_n == 0:
-                    pose = self.process_frame(frame, frame_index, timestamp)
-                    frames.append(pose)
-                else:
-                    frames.append(FramePose(
-                        frame_index=frame_index,
-                        timestamp=timestamp,
-                        landmarks=[],
-                        confidence=0.0,
-                    ))
-                
-                frame_index += 1
-        
-        finally:
-            cap.release()
-        
-        return PoseAnalysisResult(
-            frames=frames,
-            fps=fps,
-            total_frames=len(frames),
-            video_duration=end_time - start_time,
-            source_file=str(video_path),
+        return self._backend.process_video_segment(
+            video_path,
+            start_time,
+            end_time,
+            process_every_n=process_every_n,
         )
     
     def close(self):
-        """Release MediaPipe resources."""
-        if hasattr(self, 'landmarker') and self.landmarker:
-            self.landmarker.close()
+        """Release backend resources."""
+        self._backend.close()
     
     def __enter__(self):
         return self
@@ -366,23 +182,32 @@ class PoseEstimator:
 
 def estimate_poses(
     video_path: str | Path,
-    model_complexity: int = 1,
+    backend: Optional[str] = None,
     process_every_n: int = 1,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    **kwargs,
 ) -> PoseAnalysisResult:
     """
     Convenience function to estimate poses from a video.
     
     Args:
         video_path: Path to the video file.
-        model_complexity: 0, 1, or 2 (higher = more accurate).
+        backend: Backend to use ("apple_vision", "mediapipe", or None for auto).
         process_every_n: Process every Nth frame for performance.
         progress_callback: Optional callback for progress updates.
+        **kwargs: Additional arguments passed to PoseEstimator.
     
     Returns:
         PoseAnalysisResult with all detected poses.
+    
+    Example:
+        # Auto-select backend
+        result = estimate_poses("swing.mp4")
+        
+        # Force MediaPipe
+        result = estimate_poses("swing.mp4", backend="mediapipe")
     """
-    with PoseEstimator(model_complexity=model_complexity) as estimator:
+    with PoseEstimator(backend=backend, **kwargs) as estimator:
         return estimator.process_video(
             video_path,
             progress_callback=progress_callback,
