@@ -12,14 +12,7 @@ from fairwaycut.core.config import Config
 from fairwaycut.core.models import SwingPhase
 
 
-def print_banner():
-    """Print FairwayCut banner."""
-    click.secho("""
-╔═══════════════════════════════════════════╗
-║  FairwayCut - Golf Swing Auto-Segmentation ║
-║  Version {}                            ║
-╚═══════════════════════════════════════════╝
-""".format(__version__), fg="green")
+from fairwaycut.ui import console, print_banner, print_swing_summary, RichProgressHandler
 
 
 @click.group()
@@ -74,7 +67,7 @@ def analyze(
     """
     from fairwaycut.core.config import ProcessingMode
     
-    print_banner()
+    print_banner(__version__)
     
     video_path = Path(video_path)
     click.echo(f"📹 Analyzing: {video_path.name}")
@@ -94,13 +87,13 @@ def analyze(
         "lite": "🦴 Full video with lite model (slower)",
         "full": "🦴 Full video with full model (slowest, most accurate)",
     }
-    click.echo(mode_descriptions[mode])
+    console.print(mode_descriptions[mode])
     
     # Display time range
     if start > 0 or end is not None:
         start_str = f"{int(start // 60)}:{int(start % 60):02d}"
         end_str = f"{int(end // 60)}:{int(end % 60):02d}" if end else "end"
-        click.echo(f"⏱️  Time range: {start_str} → {end_str}")
+        console.print(f"⏱️  Time range: [cyan]{start_str}[/cyan] → [cyan]{end_str}[/cyan]")
     
     # Load config
     config = Config.default()
@@ -109,49 +102,28 @@ def analyze(
     # Import here to avoid slow startup
     from fairwaycut.fusion.detector import detect_swings
     
-    # Progress display
-    current_stage = ""
-    
-    def progress_callback(stage: str, current: int, total: int):
-        nonlocal current_stage
-        if stage != current_stage:
-            current_stage = stage
-            stage_names = {
-                "audio_extraction": "🎵 Extracting audio...",
-                "audio_detection": "🔍 Detecting impacts...",
-                "pose_estimation": "🦴 Estimating poses...",
-                "fusion": "🔗 Fusing signals...",
-                "complete": "✅ Analysis complete!",
-            }
-            click.echo(stage_names.get(stage, stage))
-        
-        if verbose and total > 0:
-            pct = (current / total) * 100
-            click.echo(f"   Progress: {pct:.0f}% ({current}/{total})", nl=False)
-            click.echo("\r", nl=False)
+    # Progress display using Rich
+    handler = RichProgressHandler(console, verbose=verbose)
     
     try:
         # Run detection
-        result = detect_swings(
-            video_path,
-            mode=processing_mode,
-            config=config,
-            progress_callback=progress_callback if verbose else None,
-            start_time=start,
-            end_time=end,
-        )
+        # Run detection with live progress
+        with handler.live() as h:
+            result = detect_swings(
+                video_path,
+                mode=processing_mode,
+                config=config,
+                progress_callback=h.callback,
+                start_time=start,
+                end_time=end,
+            )
         
-        click.echo()
-        click.secho(f"🎯 Found {len(result.swings)} swings", fg="green", bold=True)
+        console.print()
+        console.print(f"🎯 Found [bold green]{len(result.swings)}[/bold green] swings")
         
         # Print swing summary
         if result.swings:
-            click.echo("\n📊 Swing Summary:")
-            click.echo("-" * 60)
-            for swing in result.swings:
-                time_str = f"{swing.impact_time:.1f}s"
-                conf_str = f"{swing.combined_confidence:.0%}"
-                click.echo(f"  Swing #{swing.swing_id}: impact at {time_str} (confidence: {conf_str})")
+            print_swing_summary(result.swings)
         
         # Save report
         if output:
@@ -167,10 +139,10 @@ def analyze(
         with open(output_path, "w") as f:
             json.dump(report, f, indent=2)
         
-        click.echo(f"\n📝 Report saved: {output_path}")
+        console.print(f"\n📝 Report saved: [bold user]{output_path}[/bold user]")
         
     except Exception as e:
-        click.secho(f"❌ Error: {e}", fg="red", err=True)
+        console.print(f"❌ Error: {e}", style="bold red")
         if verbose:
             import traceback
             traceback.print_exc()
@@ -215,10 +187,10 @@ def demo(
     """
     from fairwaycut.core.config import ProcessingMode
     
-    print_banner()
+    print_banner(__version__)
     
     video_path = Path(video_path)
-    click.echo(f"📹 Processing: {video_path.name}")
+    console.print(f"📹 Processing: [bold]{video_path.name}[/bold]")
     
     # Determine output path
     if output:
@@ -226,7 +198,7 @@ def demo(
     else:
         output_path = video_path.parent / f"{video_path.stem}_demo.mp4"
     
-    click.echo(f"🎬 Output: {output_path}")
+    console.print(f"🎬 Output: [bold user]{output_path}[/bold user]")
     
     # Map mode
     mode_map = {
@@ -240,7 +212,7 @@ def demo(
     # Disable skeleton for audio-only mode
     if mode == "audio":
         skeleton = False
-        click.echo("🔊 Audio-only mode (no skeleton overlay)")
+        console.print("🔊 Audio-only mode (no skeleton overlay)")
     
     # Show options
     overlays = []
@@ -250,7 +222,7 @@ def demo(
         overlays.append("waveform")
     if phase_label and mode != "audio":
         overlays.append("phase labels")
-    click.echo(f"🎨 Overlays: {', '.join(overlays) if overlays else 'waveform only'}")
+    console.print(f"🎨 Overlays: {', '.join(overlays) if overlays else 'waveform only'}")
     
     # Import modules
     from fairwaycut.audio.extraction import extract_audio_from_video
@@ -260,37 +232,34 @@ def demo(
     
     config = Config.default()
     
+    # Progress display using Rich
+    handler = RichProgressHandler(console, verbose=verbose)
+
     try:
-        # Step 1: Extract audio
-        click.echo("\n🎵 Extracting audio...")
-        audio = extract_audio_from_video(video_path)
+        # Run detection with live progress
+        with handler.live() as h:
+            h.console.print("\n🎵 Extracting audio...")
+            audio = extract_audio_from_video(video_path)
+            
+            mode_desc = {
+                "audio": "audio only",
+                "segments": "pose around impacts",
+                "lite": "full video (lite model)",
+                "full": "full video (full model)",
+            }
+            h.console.print(f"🔍 Detecting swings ({mode_desc[mode]})...")
+
+            result = detect_swings(
+                video_path,
+                mode=processing_mode,
+                config=config,
+                progress_callback=h.callback,
+            )
         
-        # Step 2: Detect swings
-        mode_desc = {
-            "audio": "audio only",
-            "segments": "pose around impacts",
-            "lite": "full video (lite model)",
-            "full": "full video (full model)",
-        }
-        click.echo(f"🔍 Detecting swings ({mode_desc[mode]})...")
-        
-        def detection_progress(stage: str, current: int, total: int):
-            if verbose and stage == "pose_estimation" and total > 0:
-                pct = (current / total) * 100
-                click.echo(f"   Pose estimation: {pct:.0f}%", nl=False)
-                click.echo("\r", nl=False)
-        
-        result = detect_swings(
-            video_path,
-            mode=processing_mode,
-            config=config,
-            progress_callback=detection_progress if verbose else None,
-        )
-        
-        click.echo(f"\n🎯 Found {len(result.swings)} swings")
+        console.print(f"\n🎯 Found [bold green]{len(result.swings)}[/bold green] swings")
         
         # Step 3: Generate demo video
-        click.echo("🎬 Generating demo video...")
+        console.print("🎬 Generating demo video...")
         
         options = DemoVideoOptions(
             show_skeleton=skeleton,
@@ -302,25 +271,44 @@ def demo(
         
         generator = DemoVideoGenerator(options=options)
         
-        def video_progress(current: int, total: int):
-            if total > 0:
-                pct = (current / total) * 100
-                click.echo(f"   Rendering: {pct:.0f}% ({current}/{total} frames)", nl=False)
-                click.echo("\r", nl=False)
+        # Simple progress for video generation since it's not hooked into the handler
+        from rich.progress import track
         
-        generator.generate(
-            video_path,
-            output_path,
-            result,
-            audio,
-            progress_callback=video_progress,
-        )
+        # We need a custom callback wrapper for the generator because it expects (current, total)
+        # We'll use a manual progress bar here or just wrap the generator if possible.
+        # But DemoVideoGenerator.generate doesn't yield, it takes a callback.
         
-        click.echo()
-        click.secho(f"✅ Demo video saved: {output_path}", fg="green", bold=True)
+        # Let's use a new Progress instance for this separate long-running task
+        from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
+        
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeRemainingColumn(),
+            console=console,
+            transient=True,
+        ) as video_progress:
+            task = video_progress.add_task("Rendering...", total=100) # Total is unknown initially or 100%?
+            # Generator callback provides current frame index, but we might not know total frames easily ahead of time?
+            # Actually generator.generate usually knows.
+            
+            def video_progress_callback(current: int, total: int):
+                video_progress.update(task, completed=current, total=total)
+            
+            generator.generate(
+                video_path,
+                output_path,
+                result,
+                audio,
+                progress_callback=video_progress_callback,
+            )
+        
+        console.print()
+        console.print(f"✅ Demo video saved: [bold user]{output_path}[/bold user]")
         
     except Exception as e:
-        click.secho(f"❌ Error: {e}", fg="red", err=True)
+        console.print(f"❌ Error: {e}", style="bold red")
         if verbose:
             import traceback
             traceback.print_exc()
@@ -373,10 +361,10 @@ def extract(
     """
     from fairwaycut.core.config import ProcessingMode
     
-    print_banner()
+    print_banner(__version__)
     
     video_path = Path(video_path)
-    click.echo(f"📹 Processing: {video_path.name}")
+    console.print(f"📹 Processing: [bold]{video_path.name}[/bold]")
     
     # Determine output directory
     if output_dir:
@@ -385,13 +373,13 @@ def extract(
         output_path = video_path.parent / f"{video_path.stem}_swings"
     
     output_path.mkdir(parents=True, exist_ok=True)
-    click.echo(f"📁 Output directory: {output_path}")
+    console.print(f"📁 Output directory: [bold user]{output_path}[/bold user]")
     
     # Display time range
     if start > 0 or end is not None:
         start_str = f"{int(start // 60)}:{int(start % 60):02d}"
         end_str = f"{int(end // 60)}:{int(end % 60):02d}" if end else "end"
-        click.echo(f"⏱️  Time range: {start_str} → {end_str}")
+        console.print(f"⏱️  Time range: [cyan]{start_str}[/cyan] → [cyan]{end_str}[/cyan]")
     
     # Map mode
     mode_map = {
@@ -412,27 +400,33 @@ def extract(
     config.fusion.pre_impact_sec = pre_impact
     config.fusion.post_impact_sec = post_impact
     
+    # Progress display using Rich
+    handler = RichProgressHandler(console, verbose=verbose)
+
     try:
         # Step 1: Detect swings
         mode_desc = {"audio": "audio", "hybrid": "hybrid", "lite": "lite", "full": "full"}
-        click.echo(f"🔍 Detecting swings (mode: {mode_desc[mode]})...")
         
-        result = detect_swings(
-            video_path,
-            mode=processing_mode,
-            config=config,
-            start_time=start,
-            end_time=end,
-        )
+        with handler.live() as h:
+             h.console.print(f"🔍 Detecting swings (mode: {mode_desc[mode]})...")
+             
+             result = detect_swings(
+                video_path,
+                mode=processing_mode,
+                config=config,
+                start_time=start,
+                end_time=end,
+                progress_callback=h.callback,
+            )
         
-        click.echo(f"🎯 Found {len(result.swings)} swings")
+        console.print(f"🎯 Found [bold green]{len(result.swings)}[/bold green] swings")
         
         if not result.swings:
-            click.echo("No swings detected. Try adjusting parameters.")
+            console.print("No swings detected. Try adjusting parameters.", style="yellow")
             return
         
         # Step 2: Extract clips
-        click.echo("✂️ Extracting clips...")
+        console.print("✂️ Extracting clips...")
         
         if with_overlays:
             # Use demo generator for overlay clips
@@ -453,25 +447,31 @@ def extract(
                 options=options,
             )
             
-            click.echo(f"\n✅ Extracted {len(clips)} clips with overlays")
+            
+            console.print(f"\n✅ Extracted [bold green]{len(clips)}[/bold green] clips with overlays")
         else:
             # Simple extraction without overlays
             with VideoFileClip(str(video_path)) as video:
-                for swing in result.swings:
+                # Use track for simple progress
+                from rich.progress import track
+                
+                for swing in track(result.swings, description="Saving clips..."):
                     clip_path = output_path / f"swing_{swing.swing_id:03d}.mp4"
                     
                     # Extract subclip
                     subclip = video.subclipped(swing.start_time, swing.end_time)
+                    # Suppress moviepy output unless verbose, but we are inside a progress bar so suppress it anyway or it breaks UI
                     subclip.write_videofile(
                         str(clip_path),
                         codec="libx264",
                         audio_codec="aac",
-                        logger=None if not verbose else "bar",
+                        logger=None, # Suppress moviepy bar
                     )
                     
-                    click.echo(f"  ✓ Swing #{swing.swing_id}: {clip_path.name}")
+                    if verbose:
+                        console.print(f"  ✓ Swing #{swing.swing_id}: {clip_path.name}")
             
-            click.echo(f"\n✅ Extracted {len(result.swings)} clips")
+            console.print(f"\n✅ Extracted [bold green]{len(result.swings)}[/bold green] clips")
         
         # Save manifest
         manifest_path = output_path / "manifest.json"
@@ -484,10 +484,10 @@ def extract(
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, indent=2)
         
-        click.echo(f"📝 Manifest saved: {manifest_path}")
+        console.print(f"📝 Manifest saved: [bold user]{manifest_path}[/bold user]")
         
     except Exception as e:
-        click.secho(f"❌ Error: {e}", fg="red", err=True)
+        console.print(f"❌ Error: {e}", style="bold red")
         if verbose:
             import traceback
             traceback.print_exc()
@@ -509,10 +509,10 @@ def plot(
     Creates a visualization showing the audio waveform, envelope,
     spectral flux, and detected impact points.
     """
-    print_banner()
+    print_banner(__version__)
     
     video_path = Path(video_path)
-    click.echo(f"📹 Analyzing: {video_path.name}")
+    console.print(f"📹 Analyzing: [bold]{video_path.name}[/bold]")
     
     # Import modules
     from fairwaycut.audio.extraction import extract_audio_from_video
@@ -521,17 +521,17 @@ def plot(
     
     try:
         # Extract audio
-        click.echo("🎵 Extracting audio...")
+        console.print("🎵 Extracting audio...")
         audio = extract_audio_from_video(video_path)
         
         # Detect impacts
-        click.echo("🔍 Detecting impacts...")
+        console.print("🔍 Detecting impacts...")
         result = detect_impacts_adaptive_snr(audio)
         
-        click.echo(f"🎯 Found {len(result.events)} impacts")
+        console.print(f"🎯 Found [bold green]{len(result.events)}[/bold green] impacts")
         
         # Generate plot
-        click.echo("📊 Generating plot...")
+        console.print("📊 Generating plot...")
         fig = plot_analysis(audio, result)
         
         # Save
@@ -542,10 +542,10 @@ def plot(
         
         save_figure(fig, output_path)
         
-        click.secho(f"✅ Plot saved: {output_path}", fg="green", bold=True)
+        console.print(f"✅ Plot saved: [bold user]{output_path}[/bold user]")
         
     except Exception as e:
-        click.secho(f"❌ Error: {e}", fg="red", err=True)
+        console.print(f"❌ Error: {e}", style="bold red")
         if verbose:
             import traceback
             traceback.print_exc()
@@ -555,14 +555,14 @@ def plot(
 @main.command()
 def info():
     """Display version and system information."""
-    print_banner()
+    print_banner(__version__)
     
-    click.echo("System Information:")
-    click.echo(f"  Python: {sys.version}")
-    click.echo(f"  FairwayCut: {__version__}")
+    console.print("[bold]System Information:[/bold]")
+    console.print(f"  Python: {sys.version.split()[0]}")
+    console.print(f"  FairwayCut: {__version__}")
     
     # Check dependencies
-    click.echo("\nDependencies:")
+    console.print("\n[bold]Dependencies:[/bold]")
     
     deps = [
         ("numpy", "numpy"),
@@ -579,9 +579,9 @@ def info():
         try:
             m = __import__(module)
             version = getattr(m, "__version__", "unknown")
-            click.secho(f"  ✓ {name}: {version}", fg="green")
+            console.print(f"  ✓ {name}: {version}", style="green")
         except ImportError:
-            click.secho(f"  ✗ {name}: not installed", fg="red")
+            console.print(f"  ✗ {name}: not installed", style="red")
 
 
 if __name__ == "__main__":

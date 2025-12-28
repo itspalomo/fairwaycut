@@ -93,6 +93,7 @@ class PoseBackend(ABC):
         video_path: str | Path,
         start_time: float,
         end_time: float,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
         process_every_n: int = 1,
     ) -> PoseAnalysisResult:
         """
