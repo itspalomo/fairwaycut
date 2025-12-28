@@ -42,32 +42,55 @@ except ImportError:
 
 
 # Apple Vision joint names as they appear in PyObjC
-# Maps to our standardized indices (19 landmarks total)
-# PyObjC uses different naming than Swift API docs
 APPLE_VISION_JOINT_NAMES = [
-    "head_joint",           # 0 - nose/head
-    "left_eye_joint",       # 1 - left eye
-    "right_eye_joint",      # 2 - right eye
-    "left_ear_joint",       # 3 - left ear
-    "right_ear_joint",      # 4 - right ear
-    "left_shoulder_1_joint",# 5 - left shoulder
-    "right_shoulder_1_joint",# 6 - right shoulder
-    "left_forearm_joint",   # 7 - left elbow
-    "right_forearm_joint",  # 8 - right elbow
-    "left_hand_joint",      # 9 - left wrist
-    "right_hand_joint",     # 10 - right wrist
-    "left_upLeg_joint",     # 11 - left hip
-    "right_upLeg_joint",    # 12 - right hip
-    "left_leg_joint",       # 13 - left knee
-    "right_leg_joint",      # 14 - right knee
-    "left_foot_joint",      # 15 - left ankle
-    "right_foot_joint",     # 16 - right ankle
-    "neck_1_joint",         # 17 - neck
-    "root",                 # 18 - center of hips (pelvis)
+    "head_joint",            # nose/head
+    "left_eye_joint",        # left eye
+    "right_eye_joint",       # right eye
+    "left_ear_joint",        # left ear
+    "right_ear_joint",       # right ear
+    "left_shoulder_1_joint", # left shoulder
+    "right_shoulder_1_joint",# right shoulder
+    "left_forearm_joint",    # left elbow
+    "right_forearm_joint",   # right elbow
+    "left_hand_joint",       # left wrist
+    "right_hand_joint",      # right wrist
+    "left_upLeg_joint",      # left hip
+    "right_upLeg_joint",     # right hip
+    "left_leg_joint",        # left knee
+    "right_leg_joint",       # right knee
+    "left_foot_joint",       # left ankle
+    "right_foot_joint",      # right ankle
+    "neck_1_joint",          # neck
+    "root",                  # center of hips (pelvis)
 ]
 
-# Create lookup dict
-JOINT_NAME_TO_INDEX = {name: idx for idx, name in enumerate(APPLE_VISION_JOINT_NAMES)}
+# Mapping from Apple Vision joint names to MediaPipe landmark indices (0-32)
+# This allows Apple Vision output to be compatible with existing overlay code
+# MediaPipe has 33 landmarks, Apple Vision has 19 - we map what we have
+APPLE_TO_MEDIAPIPE_INDEX = {
+    "head_joint": 0,             # MediaPipe: nose
+    "left_eye_joint": 2,         # MediaPipe: left_eye (use middle eye, skip inner/outer)
+    "right_eye_joint": 5,        # MediaPipe: right_eye
+    "left_ear_joint": 7,         # MediaPipe: left_ear
+    "right_ear_joint": 8,        # MediaPipe: right_ear
+    "left_shoulder_1_joint": 11, # MediaPipe: left_shoulder
+    "right_shoulder_1_joint": 12,# MediaPipe: right_shoulder
+    "left_forearm_joint": 13,    # MediaPipe: left_elbow
+    "right_forearm_joint": 14,   # MediaPipe: right_elbow
+    "left_hand_joint": 15,       # MediaPipe: left_wrist
+    "right_hand_joint": 16,      # MediaPipe: right_wrist
+    "left_upLeg_joint": 23,      # MediaPipe: left_hip
+    "right_upLeg_joint": 24,     # MediaPipe: right_hip
+    "left_leg_joint": 25,        # MediaPipe: left_knee
+    "right_leg_joint": 26,       # MediaPipe: right_knee
+    "left_foot_joint": 27,       # MediaPipe: left_ankle
+    "right_foot_joint": 28,      # MediaPipe: right_ankle
+    "neck_1_joint": None,        # No direct MediaPipe equivalent (skip)
+    "root": None,                # No direct MediaPipe equivalent (skip)
+}
+
+# Total MediaPipe landmarks for compatibility
+MEDIAPIPE_LANDMARK_COUNT = 33
 
 
 def is_available() -> bool:
@@ -116,8 +139,8 @@ class AppleVisionBackend(PoseBackend):
     
     @property
     def num_landmarks(self) -> int:
-        """Return the number of landmarks this backend produces (Apple Vision: 19)."""
-        return 19
+        """Return the number of landmarks (33 for MediaPipe compatibility)."""
+        return MEDIAPIPE_LANDMARK_COUNT
     
     @property
     def supports_gpu(self) -> bool:
@@ -175,18 +198,29 @@ class AppleVisionBackend(PoseBackend):
         """
         Extract landmarks from a VNHumanBodyPoseObservation.
         
+        Outputs landmarks in MediaPipe-compatible format (33 landmarks)
+        for compatibility with existing overlay and analysis code.
+        
         Args:
             observation: VNHumanBodyPoseObservation from Vision framework.
             frame_height: Height of the frame (for Y coordinate flip).
         
         Returns:
-            Tuple of (landmarks list, average confidence).
+            Tuple of (landmarks list in MediaPipe format, average confidence).
         """
-        landmarks = []
+        # Initialize all 33 MediaPipe landmarks as empty placeholders
+        landmarks = [
+            Landmark(x=0.0, y=0.0, z=0.0, visibility=0.0)
+            for _ in range(MEDIAPIPE_LANDMARK_COUNT)
+        ]
         confidences = []
         
-        # Use the PyObjC joint names (strings, not enum values)
+        # Extract Apple Vision joints and map to MediaPipe indices
         for joint_name in APPLE_VISION_JOINT_NAMES:
+            mediapipe_idx = APPLE_TO_MEDIAPIPE_INDEX.get(joint_name)
+            if mediapipe_idx is None:
+                continue  # Skip joints without MediaPipe equivalent
+            
             try:
                 point, error = observation.recognizedPointForJointName_error_(
                     joint_name, None
@@ -198,29 +232,15 @@ class AppleVisionBackend(PoseBackend):
                     x = point.location().x
                     y = 1.0 - point.location().y  # Flip Y coordinate
                     
-                    landmarks.append(Landmark(
+                    landmarks[mediapipe_idx] = Landmark(
                         x=x,
                         y=y,
                         z=0.0,  # Apple Vision 2D doesn't provide depth
                         visibility=float(point.confidence()),
-                    ))
+                    )
                     confidences.append(point.confidence())
-                else:
-                    # Add placeholder for undetected joint
-                    landmarks.append(Landmark(
-                        x=0.0,
-                        y=0.0,
-                        z=0.0,
-                        visibility=0.0,
-                    ))
             except Exception:
-                # Add placeholder on error
-                landmarks.append(Landmark(
-                    x=0.0,
-                    y=0.0,
-                    z=0.0,
-                    visibility=0.0,
-                ))
+                pass  # Keep placeholder for this joint
         
         avg_confidence = float(np.mean(confidences)) if confidences else 0.0
         return landmarks, avg_confidence
