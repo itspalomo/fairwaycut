@@ -378,6 +378,8 @@ def detect_swings(
         progress_callback("audio_extraction", 0, 1)
     
     audio = extract_audio_from_video(video_path)
+    if progress_callback:
+        progress_callback("audio_extraction", 1, 1)
     
     # Apply time range
     actual_end = end_time if end_time and end_time < audio.duration else audio.duration
@@ -397,6 +399,8 @@ def detect_swings(
         min_onset=config.audio.min_onset,
         amplitude_threshold_db=config.audio.amplitude_threshold_db,
     )
+    if progress_callback:
+        progress_callback("audio_detection", 1, 1)
     
     # Adjust event timestamps back to absolute video time
     if start_time > 0:
@@ -474,6 +478,9 @@ def detect_swings(
             pre_impact_sec=config.fusion.pre_impact_sec,
             post_impact_sec=config.fusion.post_impact_sec,
         )
+    
+    if progress_callback:
+        progress_callback("fusion", 1, 1)
     
     if progress_callback:
         progress_callback("complete", 1, 1)
@@ -565,6 +572,7 @@ def _process_full_video_pose(
                 video_path,
                 start_time=start_time,
                 end_time=end_time if end_time else float('inf'),
+                progress_callback=pose_progress,
                 process_every_n=config.pose.process_every_n_frames,
             )
         else:

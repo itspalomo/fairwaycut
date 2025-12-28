@@ -397,6 +397,7 @@ class AppleVisionBackend(PoseBackend):
         video_path: str | Path,
         start_time: float,
         end_time: float,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
         process_every_n: int = 1,
     ) -> PoseAnalysisResult:
         """
@@ -454,6 +455,12 @@ class AppleVisionBackend(PoseBackend):
                     ))
                 
                 frame_index += 1
+                
+                # Progress callback
+                if progress_callback and frame_index % 30 == 0:
+                    segment_frames = end_frame - start_frame
+                    current_frames = frame_index - start_frame
+                    progress_callback(current_frames, segment_frames)
         
         finally:
             cap.release()
