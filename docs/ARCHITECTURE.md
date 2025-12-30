@@ -88,7 +88,7 @@ Defines the shared data structures and validation rules.
 
 - **Segmentation**: Each fused `SwingEvent` defines `start_time`/`end_time` using configurable pre/post impact buffers.
 - **Extraction**: `moviepy` writes individual swing MP4s; a manifest and JSON report are saved alongside clips.
-- **Overlays**: The demo/overlay path renders pose skeletons, waveforms, timestamps, impact markers, and optional phase labels. Visualization presets control glow, trails, and depth coloring.
+- **Overlays**: The overlay pipeline renders pose skeletons, waveforms, timestamps, impact markers, and optional phase labels. Visualization presets control glow, trails, and depth coloring.
 - **Modes**:
     - `audio`: audio-only overlays (fastest).
     - `segments` / `hybrid`: pose only around impacts (best speed/accuracy balance).

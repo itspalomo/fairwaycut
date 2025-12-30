@@ -30,7 +30,7 @@ Before (raw range video) vs after (auto-cut clip with skeleton, waveform, and ph
     - **Fusion** to combine the two and filter false positives.
 - **Flexible modes**:
     - `audio` (fastest), `hybrid` (audio + targeted pose), `lite` (full video, lite pose), `full` (full video, high-accuracy pose).
-- **Overlay visualizations**: Generate demo videos with pose skeletons, audio waveforms, and swing phase labels.
+- **Overlay visualizations**: Add pose skeletons, audio waveforms, and swing phase labels to exported clips.
 
 ## Installation
 
@@ -61,11 +61,10 @@ uv sync --extra apple
     uv run fairwaycut extract input_video.mov --output-dir ./swings --mode hybrid
     ```
 
-2.  **Create an overlay demo** (spot-check detections visually).
+2.  **Export overlay clips** (spot-check detections visually).
     ```bash
-    uv run fairwaycut demo input_video.mov --mode segments --output demo.mp4
+    uv run fairwaycut extract input_video.mov --with-overlays --mode hybrid
     ```
-    - `demo` keeps the full-length video and paints overlays across it.
 
 3.  **View Help**:
     ```bash
@@ -90,17 +89,6 @@ Detects swings and prints a text report without saving videos. Good for testing 
 ```bash
 fairwaycut analyze <VIDEO_PATH>
 ```
-
-### `demo`
-Creates a full-length video with debugging overlays (skeletons, waveforms, impact markers).
-
-```bash
-fairwaycut demo <VIDEO_PATH> --output demo.mp4 --skeleton --waveform
-```
-- `--mode`: `audio` (audio overlay only), `segments` (pose around detected impacts), `lite` (full video, lite pose), `full` (full video, high-accuracy pose).
-- Overlays: skeleton, waveform, phase labels, timestamps, and impact markers.
-- Note: `segments` is only for the demo command; use `hybrid` on `extract`/`analyze` for the same detection strategy.
-- `demo` output is the full source duration with overlays (for visual QA). `extract --with-overlays` instead produces per-swing clipped MP4s with overlays.
 
 ### `plot`
 Generates a matplotlib figure showing audio analysis and detection signals.
