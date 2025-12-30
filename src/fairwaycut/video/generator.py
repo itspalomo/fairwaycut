@@ -32,6 +32,40 @@ from fairwaycut.video.overlays import (
 )
 from fairwaycut.pose.swing_phases import SwingPhasesResult
 
+# 3D visualization imports
+from fairwaycut.pose.normalizer import PoseNormalizer, NormalizedPose
+from fairwaycut.visualization.composite import (
+    CompositeRenderer,
+    CompositeOptions,
+    LayoutMode,
+)
+from fairwaycut.visualization.viewer3d import Viewer3DOptions
+from fairwaycut.visualization.voxel import VoxelOptions
+
+
+@dataclass
+class View3DOptions:
+    """Options for 3D pose visualization."""
+    
+    # Enable 3D view
+    enabled: bool = False
+    
+    # Layout mode
+    layout: str = "inset"  # "inset" or "side-by-side"
+    
+    # Camera view
+    camera_view: str = "isometric"  # "front", "dtl", "isometric"
+    
+    # Voxel visualization
+    show_voxel: bool = False
+    
+    # Inset settings
+    inset_size_ratio: float = 0.3  # Size relative to video height
+    inset_position: str = "top-right"
+    
+    # Side-by-side settings
+    video_width_ratio: float = 0.6  # Video takes 60% of width
+
 
 @dataclass
 class DemoVideoOptions:
@@ -60,6 +94,9 @@ class DemoVideoOptions:
     skeleton_render_mode: RenderMode = field(default=RenderMode.STANDARD)
     skeleton_renderer_options: Optional[SkeletonRendererOptions] = None
     
+    # 3D visualization settings
+    view_3d: Optional[View3DOptions] = None
+    
     # Output settings
     output_fps: Optional[float] = None  # None = match input
     output_codec: str = "mp4v"
@@ -76,6 +113,8 @@ class DemoVideoGenerator:
     - Audio waveform with impact markers
     - Current swing phase label
     - Impact flash indicator
+    - Optional 3D pose viewer (side-by-side or inset)
+    - Optional voxel motion volume
     """
     
     def __init__(
@@ -115,6 +154,75 @@ class DemoVideoGenerator:
                 renderer_opts.golf_mode = self.options.golf_mode
             
             self._skeleton_renderer = SkeletonRenderer(options=renderer_opts)
+        
+        # Initialize 3D components if enabled
+        self._composite_renderer: Optional[CompositeRenderer] = None
+        self._pose_normalizer: Optional[PoseNormalizer] = None
+        
+        if self.options.view_3d and self.options.view_3d.enabled:
+            self._init_3d_components()
+    
+    def _init_3d_components(self) -> None:
+        """Initialize 3D visualization components."""
+        view_3d = self.options.view_3d
+        
+        # Create pose normalizer
+        self._pose_normalizer = PoseNormalizer()
+        
+        # Create viewer options
+        viewer_opts = Viewer3DOptions(
+            camera_view=view_3d.camera_view,
+            figsize=(3, 3),  # Reasonable size for inset/side-by-side
+            dpi=72,
+        )
+        
+        # Create voxel options if enabled
+        voxel_opts = None
+        if view_3d.show_voxel:
+            voxel_opts = VoxelOptions(
+                grid_size=12,
+                history_frames=15,
+                color_by="velocity",
+                camera_view=view_3d.camera_view,
+            )
+        
+        # Create composite options
+        layout_mode = LayoutMode(view_3d.layout)
+        composite_opts = CompositeOptions(
+            layout=layout_mode,
+            video_width_ratio=view_3d.video_width_ratio,
+            inset_position=view_3d.inset_position,
+            inset_size_ratio=view_3d.inset_size_ratio,
+            show_voxel=view_3d.show_voxel,
+            viewer_3d_options=viewer_opts,
+            voxel_options=voxel_opts,
+        )
+        
+        # Create composite renderer
+        self._composite_renderer = CompositeRenderer(composite_opts)
+    
+    def _get_3d_output_dimensions(
+        self,
+        video_width: int,
+        video_height: int,
+    ) -> tuple[int, int]:
+        """Calculate output dimensions when 3D view is enabled.
+        
+        Args:
+            video_width: Original video width
+            video_height: Original video height (without waveform)
+            
+        Returns:
+            (width, height) for output video
+        """
+        view_3d = self.options.view_3d
+        
+        if view_3d.layout == "side-by-side":
+            # Width stays same (video + 3D panel fit in original width)
+            return video_width, video_height
+        else:
+            # Inset mode: same dimensions as input
+            return video_width, video_height
     
     def generate(
         self,
@@ -177,6 +285,12 @@ class DemoVideoGenerator:
             if self._skeleton_renderer:
                 self._skeleton_renderer.reset()
             
+            # Reset 3D components for fresh history
+            if self._composite_renderer:
+                self._composite_renderer.reset()
+            if self._pose_normalizer:
+                self._pose_normalizer.reset()
+            
             # Get pose data if available
             pose_result = fusion_result.pose_result
             audio_result = fusion_result.audio_result
@@ -226,6 +340,10 @@ class DemoVideoGenerator:
                     audio,
                     audio_result,
                 )
+                
+                # Apply 3D composite if enabled
+                if self._composite_renderer and current_pose:
+                    frame = self._apply_3d_overlay(frame, current_pose, current_phase)
                 
                 # Add waveform strip if enabled
                 if self.options.show_waveform:
@@ -341,6 +459,35 @@ class DemoVideoGenerator:
         
         return expanded
     
+    def _apply_3d_overlay(
+        self,
+        frame: np.ndarray,
+        pose: FramePose,
+        phase: SwingPhase,
+    ) -> np.ndarray:
+        """Apply 3D visualization overlay to frame.
+        
+        Args:
+            frame: Video frame with 2D overlays applied
+            pose: Current FramePose
+            phase: Current swing phase
+            
+        Returns:
+            Frame with 3D visualization composited
+        """
+        if not self._composite_renderer or not self._pose_normalizer:
+            return frame
+        
+        # Normalize the pose
+        normalized = self._pose_normalizer.normalize(pose, phase)
+        
+        if normalized is None:
+            # Couldn't normalize, render without 3D
+            return self._composite_renderer.render(frame, None)
+        
+        # Render composite
+        return self._composite_renderer.render(frame, normalized)
+    
     def generate_swing_clip(
         self,
         video_path: str | Path,
@@ -411,6 +558,12 @@ class DemoVideoGenerator:
             if self._skeleton_renderer:
                 self._skeleton_renderer.reset()
             
+            # Reset 3D components for fresh history
+            if self._composite_renderer:
+                self._composite_renderer.reset()
+            if self._pose_normalizer:
+                self._pose_normalizer.reset()
+            
             # Get audio segment
             audio_segment = audio.get_segment(swing.start_time, swing.end_time)
             
@@ -441,6 +594,10 @@ class DemoVideoGenerator:
                     audio,
                     fusion_result.audio_result,
                 )
+                
+                # Apply 3D composite if enabled
+                if self._composite_renderer and current_pose:
+                    frame = self._apply_3d_overlay(frame, current_pose, current_phase)
                 
                 if self.options.show_waveform:
                     frame = self._add_waveform_strip(
