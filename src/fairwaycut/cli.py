@@ -259,20 +259,6 @@ def analyze(
     default="segments",
     help="Processing mode for detection"
 )
-@click.option("--view-3d/--no-view-3d", default=False, help="Enable 3D pose viewer")
-@click.option(
-    "--layout-3d",
-    type=click.Choice(["inset", "side-by-side"]),
-    default="inset",
-    help="3D view layout: inset (picture-in-picture) or side-by-side"
-)
-@click.option(
-    "--camera-3d",
-    type=click.Choice(["front", "dtl", "isometric"]),
-    default="isometric",
-    help="3D camera angle: front, dtl (down-the-line), or isometric"
-)
-@click.option("--show-voxel/--no-voxel", default=False, help="Show voxel motion volume in 3D view")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 def demo(
     video_path: str,
@@ -281,10 +267,6 @@ def demo(
     waveform: bool,
     phase_label: bool,
     mode: str,
-    view_3d: bool,
-    layout_3d: str,
-    camera_3d: str,
-    show_voxel: bool,
     verbose: bool,
 ):
     """
@@ -301,17 +283,8 @@ def demo(
       lite     - Full pose with lite model
       full     - Full pose with full model (best quality)
     
-    3D Visualization (--view-3d):
-    
-    \b
-      --view-3d              Enable 3D pose viewer
-      --layout-3d inset      Picture-in-picture (default)
-      --layout-3d side-by-side  Video + 3D view side by side
-      --camera-3d front      Face-on view
-      --camera-3d dtl        Down-the-line view
-      --camera-3d isometric  3/4 view (default)
-      --show-voxel           Show voxel motion trail
     """
+
     from fairwaycut.core.config import ProcessingMode
     
     print_banner(__version__)
@@ -354,22 +327,12 @@ def demo(
     # Import modules
     from fairwaycut.audio.extraction import extract_audio_from_video
     from fairwaycut.fusion.detector import detect_swings
-    from fairwaycut.video.generator import DemoVideoGenerator, DemoVideoOptions, View3DOptions
+    from fairwaycut.video.generator import DemoVideoGenerator, DemoVideoOptions
     from fairwaycut.core.config import Config
     
     config = Config.default()
     
-    # Setup 3D options if enabled
-    view_3d_options = None
-    if view_3d:
-        view_3d_options = View3DOptions(
-            enabled=True,
-            layout=layout_3d,
-            camera_view=camera_3d,
-            show_voxel=show_voxel,
-        )
-        console.print(f"🎮 3D View: {layout_3d} layout, {camera_3d} camera" + 
-                      (" + voxel" if show_voxel else ""))
+
     
     # Progress display using Rich
     handler = RichProgressHandler(console, verbose=verbose)
@@ -406,7 +369,6 @@ def demo(
             show_phase_label=phase_label,
             show_timestamp=True,
             show_impact_marker=True,
-            view_3d=view_3d_options,
         )
         
         generator = DemoVideoGenerator(options=options)
@@ -469,20 +431,7 @@ def demo(
 @click.option("--pre-impact", type=float, default=3.0, help="Seconds before impact to include in clip")
 @click.option("--post-impact", type=float, default=2.0, help="Seconds after impact to include in clip")
 @click.option("--with-overlays/--no-overlays", default=False, help="Add visual overlays to clips")
-@click.option("--view-3d/--no-view-3d", default=False, help="Enable 3D pose viewer (requires --with-overlays)")
-@click.option(
-    "--layout-3d",
-    type=click.Choice(["inset", "side-by-side"]),
-    default="inset",
-    help="3D view layout (requires --with-overlays --view-3d)"
-)
-@click.option(
-    "--camera-3d",
-    type=click.Choice(["front", "dtl", "isometric"]),
-    default="isometric",
-    help="3D camera angle (requires --with-overlays --view-3d)"
-)
-@click.option("--show-voxel/--no-voxel", default=False, help="Show voxel motion volume (requires --with-overlays --view-3d)")
+@click.option("--export-3d/--no-export-3d", default=False, help="Export interactive 3D viewer for each swing")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 def extract(
     video_path: str,
@@ -493,10 +442,7 @@ def extract(
     pre_impact: float,
     post_impact: float,
     with_overlays: bool,
-    view_3d: bool,
-    layout_3d: str,
-    camera_3d: str,
-    show_voxel: bool,
+    export_3d: bool,
     verbose: bool,
 ):
     """
@@ -511,19 +457,9 @@ def extract(
       lite   - Full video pose with lite model
       full   - Full video pose with full model
     
-    \b
-    3D Options (when using --with-overlays):
-      --view-3d              Enable 3D pose viewer in clips
-      --layout-3d inset      Picture-in-picture (default)
-      --layout-3d side-by-side  Video + 3D view side by side
-      --camera-3d front/dtl/isometric  Camera angle
-      --show-voxel           Show voxel motion trail
-    
-    \b
-    Examples:
       fairwaycut extract video.mp4                        # Quick extraction
       fairwaycut extract video.mp4 --with-overlays -m hybrid  # With skeleton
-      fairwaycut extract video.mp4 --with-overlays --view-3d  # With 3D view
+      fairwaycut extract video.mp4 --export-3d            # With interactive 3D export
       fairwaycut extract video.mp4 -s 60 -e 180           # Only 1:00-3:00
     """
     from fairwaycut.core.config import ProcessingMode
@@ -597,27 +533,16 @@ def extract(
         
         if with_overlays:
             # Use demo generator for overlay clips
-            from fairwaycut.video.generator import generate_all_swing_clips, DemoVideoOptions, View3DOptions
+            from fairwaycut.video.generator import generate_all_swing_clips, DemoVideoOptions
             
             audio = extract_audio_from_video(video_path)
             
-            # Setup 3D options if enabled
-            view_3d_options = None
-            if view_3d:
-                view_3d_options = View3DOptions(
-                    enabled=True,
-                    layout=layout_3d,
-                    camera_view=camera_3d,
-                    show_voxel=show_voxel,
-                )
-                console.print(f"🎮 3D View: {layout_3d} layout, {camera_3d} camera" + 
-                              (" + voxel" if show_voxel else ""))
+
             
             options = DemoVideoOptions(
                 show_skeleton=True,
                 show_waveform=True,
                 show_phase_label=True,
-                view_3d=view_3d_options,
             )
             
             clips = generate_all_swing_clips(
@@ -653,6 +578,35 @@ def extract(
                         console.print(f"  ✓ Swing #{swing.swing_id}: {clip_path.name}")
             
             console.print(f"\n✅ Extracted [bold green]{len(result.swings)}[/bold green] clips")
+        
+        # Step 3: Export 3D viewer if requested
+        if export_3d and result.pose_result and result.pose_result.frames:
+            console.print("🎮 Generating 3D viewers...")
+            from fairwaycut.pose.normalizer import PoseNormalizer
+            from fairwaycut.visualization.interactive import generate_interactive_swing_viewer
+            
+            normalizer = PoseNormalizer()
+            
+            for i, swing in enumerate(result.swings):
+                swing_frames = [
+                    f for f in result.pose_result.frames
+                    if swing.start_time <= f.timestamp <= swing.end_time
+                ]
+                
+                if swing_frames:
+                    normalized = normalizer.normalize_sequence(swing_frames)
+                    normalizer.reset()
+                    
+                    if normalized:
+                        html_path = output_path / f"swing_{swing.swing_id:03d}_3d.html"
+                        generate_interactive_swing_viewer(
+                            normalized,
+                            swing,
+                            html_path,
+                            title=f"Swing #{swing.swing_id}",
+                        )
+            
+            console.print(f"✅ Generated 3D viewers in [bold user]{output_path}[/bold user]")
         
         # Save manifest
         manifest_path = output_path / "manifest.json"
