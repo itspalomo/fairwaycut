@@ -60,7 +60,7 @@ class Viewer3DOptions:
     """Configuration options for 3D viewer."""
     
     # Camera
-    camera_view: str = "isometric"
+    camera_view: str = "dtl"  # Changed default to DTL - more intuitive for golf
     
     # Figure size (in inches, will be converted to pixels)
     figsize: tuple[float, float] = (4, 4)
@@ -85,6 +85,11 @@ class Viewer3DOptions:
     xlim: tuple[float, float] = (-1.5, 1.5)
     ylim: tuple[float, float] = (-1.5, 1.5)
     zlim: tuple[float, float] = (-0.5, 2.0)
+    
+    # Spatial reference (NEW)
+    show_ground_plane: bool = True
+    show_axis_markers: bool = True
+    ground_plane_alpha: float = 0.3
     
     # Grid and labels
     show_grid: bool = False
@@ -217,6 +222,12 @@ class SwingViewer3D:
             bone_color = self.options.default_bone_color
             joint_color = self.options.default_joint_color
         
+        # Draw spatial reference (ground plane and axis markers)
+        if self.options.show_ground_plane:
+            self._draw_ground_plane()
+        if self.options.show_axis_markers:
+            self._draw_axis_markers()
+        
         # Draw motion trail if provided
         if trail_poses:
             self._draw_trail(trail_poses, bone_color)
@@ -226,6 +237,64 @@ class SwingViewer3D:
         
         # Convert to numpy array
         return self._fig_to_numpy()
+    
+    def _draw_ground_plane(self) -> None:
+        """Draw a ground plane grid for spatial reference."""
+        # Create grid lines on the ground (Y=0 in our coords, Z=0 in matplotlib)
+        grid_size = 1.5
+        num_lines = 5
+        alpha = self.options.ground_plane_alpha
+        
+        # Grid lines parallel to X axis
+        for i in np.linspace(-grid_size, grid_size, num_lines):
+            self._ax.plot(
+                [-grid_size, grid_size],  # X
+                [i, i],  # Y (depth in mpl)
+                [0, 0],  # Z (height in mpl) = ground
+                color='gray',
+                linewidth=0.5,
+                alpha=alpha,
+            )
+        
+        # Grid lines parallel to Z (depth) axis
+        for i in np.linspace(-grid_size, grid_size, num_lines):
+            self._ax.plot(
+                [i, i],  # X
+                [-grid_size, grid_size],  # Y (depth in mpl)
+                [0, 0],  # Z = ground
+                color='gray',
+                linewidth=0.5,
+                alpha=alpha,
+            )
+    
+    def _draw_axis_markers(self) -> None:
+        """Draw axis direction markers for orientation."""
+        origin = [0, 0, 0]
+        arrow_len = 0.4
+        
+        # X axis (right) - Red
+        self._ax.quiver(
+            origin[0], origin[1], origin[2],
+            arrow_len, 0, 0,
+            color='red', alpha=0.7, arrow_length_ratio=0.2,
+        )
+        self._ax.text(arrow_len + 0.1, 0, 0, 'R', color='red', fontsize=8, alpha=0.7)
+        
+        # Y (depth toward camera in our coords -> mpl Y) - Green  
+        self._ax.quiver(
+            origin[0], origin[1], origin[2],
+            0, arrow_len, 0,
+            color='green', alpha=0.7, arrow_length_ratio=0.2,
+        )
+        self._ax.text(0, arrow_len + 0.1, 0, 'CAM', color='green', fontsize=7, alpha=0.7)
+        
+        # Z (up in mpl) - Blue
+        self._ax.quiver(
+            origin[0], origin[1], origin[2],
+            0, 0, arrow_len,
+            color='cyan', alpha=0.7, arrow_length_ratio=0.2,
+        )
+        self._ax.text(0, 0, arrow_len + 0.1, 'UP', color='cyan', fontsize=8, alpha=0.7)
     
     def _draw_skeleton(
         self,

@@ -23,6 +23,9 @@ apple = [
     "pyobjc-framework-Vision>=10.0",
     "pyobjc-framework-Quartz>=10.0",
 ]
+interactive = [
+    "plotly>=5.18.0",
+]
 
 [project.scripts]
 fairwaycut = "fairwaycut.cli:main"

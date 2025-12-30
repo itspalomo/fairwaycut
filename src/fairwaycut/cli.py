@@ -35,7 +35,8 @@ def main():
 @click.option("--end", "-e", type=float, default=None, help="End time in seconds (default: video end)")
 @click.option("--min-gap", type=float, default=3.0, help="Minimum gap between swings (seconds)")
 @click.option("--export-3d-poses/--no-3d-poses", default=False, help="Include normalized 3D poses in JSON report")
-@click.option("--plot-3d/--no-plot-3d", default=False, help="Generate 3D swing analysis plot")
+@click.option("--plot-3d/--no-plot-3d", default=False, help="Generate 3D swing analysis plot (static PNG)")
+@click.option("--interactive-3d/--no-interactive-3d", default=False, help="Generate interactive 3D HTML viewer (rotatable)")
 @click.option(
     "--camera-3d",
     type=click.Choice(["front", "dtl", "isometric"]),
@@ -52,6 +53,7 @@ def analyze(
     min_gap: float,
     export_3d_poses: bool,
     plot_3d: bool,
+    interactive_3d: bool,
     camera_3d: str,
     verbose: bool,
 ):
@@ -80,7 +82,8 @@ def analyze(
     
     \b
       --export-3d-poses  Include normalized 3D world coordinates in JSON
-      --plot-3d          Generate multi-view 3D swing analysis image
+      --plot-3d          Generate static multi-view 3D swing analysis image
+      --interactive-3d   Generate interactive HTML viewer (rotatable/zoomable)
       --camera-3d        Camera angle for 3D plot (front/dtl/isometric)
     """
     from fairwaycut.core.config import ProcessingMode
@@ -206,6 +209,35 @@ def analyze(
                             camera_views=["front", "dtl", "isometric"],
                         )
                         console.print(f"  ✓ Saved 3D plot: [bold user]{plot_path.name}[/bold user]")
+        
+        # Generate interactive 3D HTML if requested
+        if interactive_3d and result.pose_result and result.swings:
+            console.print("🎮 Generating interactive 3D viewer...")
+            from fairwaycut.pose.normalizer import PoseNormalizer
+            from fairwaycut.visualization.interactive import generate_interactive_swing_viewer
+            
+            normalizer = PoseNormalizer()
+            
+            for swing in result.swings:
+                swing_frames = [
+                    f for f in result.pose_result.frames
+                    if swing.start_time <= f.timestamp <= swing.end_time
+                ]
+                
+                if swing_frames:
+                    normalized = normalizer.normalize_sequence(swing_frames)
+                    normalizer.reset()
+                    
+                    if normalized:
+                        html_path = output_path.parent / f"{output_path.stem}_swing{swing.swing_id}_3d.html"
+                        generate_interactive_swing_viewer(
+                            normalized,
+                            swing,
+                            html_path,
+                            title=f"Swing #{swing.swing_id}",
+                        )
+                        console.print(f"  ✓ Saved interactive viewer: [bold user]{html_path.name}[/bold user]")
+                        console.print(f"    Open in browser to rotate/zoom/pan")
         
     except Exception as e:
         console.print(f"❌ Error: {e}", style="bold red")
