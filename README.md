@@ -6,18 +6,31 @@
 ![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)
 ![CI](https://img.shields.io/badge/CI-pending-yellow)
 
-**Auto-cut golf videos into clean swing clips — open-source, accurate, and batch-friendly.**
+**Auto-cut golf videos into clean swing clips — open-source, accurate, and deterministic.**
 
 FairwayCut is a local, offline command-line tool designed for golfers and developers. It automatically detects and extracts individual golf swings from continuous driving range videos without the need for manual editing or cloud processing.
+
+## What It Looks Like
+
+![Swing overlay demo](docs/assets/after_overlay.gif)
+
+Before (raw range video) vs after (auto-cut clip with skeleton, waveform, and phase labels):
+
+| Raw capture | Auto-cut clip |
+| --- | --- |
+| ![Before](docs/assets/before_raw.jpg) | ![After](docs/assets/after_overlay.jpg) |
 
 ## Key Features
 
 - **Local & Privacy-Focused**: Runs entirely on your machine. No cloud uploads.
-- **Deterministic**: Same input + same settings = same output.
-- **Flexible Modes**:
-    - `audio`: Fast detection based on impact sounds.
-    - `hybrid`: Combines audio with pose estimation (Apple Vision / MediaPipe) for high accuracy.
-- **Overlay Visualizations**: Generate demo videos with pose skeletons and audio waveforms.
+- **Deterministic by design**: Same input + same settings = the same clips every time.
+- **Multi-modal detection**:
+    - **Audio (transient + adaptive SNR)** for quick candidate impacts.
+    - **Pose (MediaPipe / Apple Vision)** for swing phase validation.
+    - **Fusion** to combine the two and filter false positives.
+- **Flexible modes**:
+    - `audio` (fastest), `hybrid` (audio + targeted pose), `lite` (full video, lite pose), `full` (full video, high-accuracy pose).
+- **Overlay visualizations**: Generate demo videos with pose skeletons, audio waveforms, and swing phase labels.
 
 ## Installation
 
@@ -48,7 +61,13 @@ uv sync --extra apple
     uv run fairwaycut extract input_video.mov --output-dir ./swings --mode hybrid
     ```
 
-2.  **View Help**:
+2.  **Create an overlay demo** (spot-check detections visually).
+    ```bash
+    uv run fairwaycut demo input_video.mov --mode segments --output demo.mp4
+    ```
+    - `demo` keeps the full-length video and paints overlays across it.
+
+3.  **View Help**:
     ```bash
     uv run fairwaycut --help
     ```
@@ -78,6 +97,10 @@ Creates a full-length video with debugging overlays (skeletons, waveforms, impac
 ```bash
 fairwaycut demo <VIDEO_PATH> --output demo.mp4 --skeleton --waveform
 ```
+- `--mode`: `audio` (audio overlay only), `segments` (pose around detected impacts), `lite` (full video, lite pose), `full` (full video, high-accuracy pose).
+- Overlays: skeleton, waveform, phase labels, timestamps, and impact markers.
+- Note: `segments` is only for the demo command; use `hybrid` on `extract`/`analyze` for the same detection strategy.
+- `demo` output is the full source duration with overlays (for visual QA). `extract --with-overlays` instead produces per-swing clipped MP4s with overlays.
 
 ### `plot`
 Generates a matplotlib figure showing audio analysis and detection signals.
@@ -85,6 +108,15 @@ Generates a matplotlib figure showing audio analysis and detection signals.
 ```bash
 fairwaycut plot <VIDEO_PATH>
 ```
+
+## How It Works (High Level)
+
+- **Audio transient analysis**: We measure spectral flux + onset strength and gate peaks using adaptive, local SNR. This catches the sharp “crack” of impact while ignoring crowd noise, music, or HVAC hum.
+- **Pose validation**: Around each candidate impact we run MediaPipe (or Apple Vision on macOS) to confirm a swing pattern and estimate swing phases.
+- **Fusion**: Audio confidence and pose confidence are weighted to keep true swings and drop false positives; configurable pre/post impact windows define the exported clips.
+- **Determinism**: Fixed seeds, stable thresholds, and ordered fusion rules guarantee repeatable results.
+
+For deeper details, see `docs/ARCHITECTURE.md`.
 
 ## Roadmap
 
