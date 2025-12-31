@@ -40,6 +40,20 @@ The transient analysis provides a zoomed-in view of the spectral characteristics
 
 This visualization shows the spectrogram and flux around the impact, helping to verify the "sharpness" and spectral content of the sound (the "crack" of the club).
 
+## Experimental: 3D Swing Export
+
+FairwayCut can export individual swings as interactive 3D HTML visualizations. This allows you to rotate, zoom, and analyze the skeletal motion from any angle in your browser.
+
+![3D Swing Export Demo](docs/assets/3d_swing_demo.gif)
+
+> [!WARNING]
+> This feature is currently experimental. The coordinate mapping and visualizer UI may change in future versions.
+
+To try it, use the `--export-3d` flag:
+```bash
+uv run fairwaycut extract input_video.mov --export-3d
+```
+
 ## Key Features
 
 - **Local & Privacy-Focused**: Runs entirely on your machine. No cloud uploads.
