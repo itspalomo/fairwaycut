@@ -34,6 +34,15 @@ def main():
 @click.option("--start", "-s", type=float, default=0.0, help="Start time in seconds")
 @click.option("--end", "-e", type=float, default=None, help="End time in seconds (default: video end)")
 @click.option("--min-gap", type=float, default=3.0, help="Minimum gap between swings (seconds)")
+@click.option("--export-3d-poses/--no-3d-poses", default=False, help="Include normalized 3D poses in JSON report")
+@click.option("--plot-3d/--no-plot-3d", default=False, help="Generate 3D swing analysis plot (static PNG)")
+@click.option("--interactive-3d/--no-interactive-3d", default=False, help="Generate interactive 3D HTML viewer (rotatable)")
+@click.option(
+    "--camera-3d",
+    type=click.Choice(["front", "dtl", "isometric"]),
+    default="isometric",
+    help="Camera angle for 3D plot"
+)
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 def analyze(
     video_path: str,
@@ -42,6 +51,10 @@ def analyze(
     start: float,
     end: Optional[float],
     min_gap: float,
+    export_3d_poses: bool,
+    plot_3d: bool,
+    interactive_3d: bool,
+    camera_3d: str,
     verbose: bool,
 ):
     """
@@ -64,6 +77,14 @@ def analyze(
       --start 60 --end 180    # Analyze 1:00 to 3:00
       --start 0 --end 120     # First 2 minutes
       --start 300             # From 5:00 to end
+    
+    3D Export options:
+    
+    \b
+      --export-3d-poses  Include normalized 3D world coordinates in JSON
+      --plot-3d          Generate static multi-view 3D swing analysis image
+      --interactive-3d   Generate interactive HTML viewer (rotatable/zoomable)
+      --camera-3d        Camera angle for 3D plot (front/dtl/isometric)
     """
     from fairwaycut.core.config import ProcessingMode
     
@@ -135,177 +156,88 @@ def analyze(
         report["source_file"] = str(video_path)
         report["version"] = __version__
         
+        # Add 3D poses to report if requested
+        if export_3d_poses and result.pose_result and result.pose_result.frames:
+            console.print("🎮 Normalizing 3D poses...")
+            from fairwaycut.pose.normalizer import PoseNormalizer, normalize_poses_for_export
+            
+            # Export normalized poses for each swing
+            for i, swing in enumerate(result.swings):
+                # Get frames for this swing
+                swing_frames = [
+                    f for f in result.pose_result.frames
+                    if swing.start_time <= f.timestamp <= swing.end_time
+                ]
+                
+                if swing_frames:
+                    poses_3d = normalize_poses_for_export(swing_frames)
+                    report["swings"][i]["poses_3d"] = poses_3d
+            
+            console.print(f"  ✓ Added 3D poses for {len(result.swings)} swings")
+        
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
             json.dump(report, f, indent=2)
         
         console.print(f"\n📝 Report saved: [bold user]{output_path}[/bold user]")
         
-    except Exception as e:
-        console.print(f"❌ Error: {e}", style="bold red")
-        if verbose:
-            import traceback
-            traceback.print_exc()
-        sys.exit(1)
-
-
-@main.command()
-@click.argument("video_path", type=click.Path(exists=True))
-@click.option("--output", "-o", type=click.Path(), help="Output video path")
-@click.option("--skeleton/--no-skeleton", default=True, help="Show pose skeleton")
-@click.option("--waveform/--no-waveform", default=True, help="Show audio waveform")
-@click.option("--phase-label/--no-phase-label", default=True, help="Show swing phase labels")
-@click.option(
-    "--mode", "-m",
-    type=click.Choice(["audio", "segments", "lite", "full"]),
-    default="segments",
-    help="Processing mode for detection"
-)
-@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
-def demo(
-    video_path: str,
-    output: Optional[str],
-    skeleton: bool,
-    waveform: bool,
-    phase_label: bool,
-    mode: str,
-    verbose: bool,
-):
-    """
-    Generate a demo video with overlays.
-    
-    Creates a new video with pose skeleton, audio waveform,
-    and swing phase labels overlaid on the original footage.
-    
-    Use --mode to control speed/accuracy tradeoff:
-    
-    \b
-      audio    - Audio overlay only (fastest, no skeleton)
-      segments - Pose around impacts (recommended)
-      lite     - Full pose with lite model
-      full     - Full pose with full model (best quality)
-    """
-    from fairwaycut.core.config import ProcessingMode
-    
-    print_banner(__version__)
-    
-    video_path = Path(video_path)
-    console.print(f"📹 Processing: [bold]{video_path.name}[/bold]")
-    
-    # Determine output path
-    if output:
-        output_path = Path(output)
-    else:
-        output_path = video_path.parent / f"{video_path.stem}_demo.mp4"
-    
-    console.print(f"🎬 Output: [bold user]{output_path}[/bold user]")
-    
-    # Map mode
-    mode_map = {
-        "audio": ProcessingMode.AUDIO_ONLY,
-        "segments": ProcessingMode.POSE_SEGMENTS,
-        "lite": ProcessingMode.POSE_LITE,
-        "full": ProcessingMode.POSE_FULL,
-    }
-    processing_mode = mode_map[mode]
-    
-    # Disable skeleton for audio-only mode
-    if mode == "audio":
-        skeleton = False
-        console.print("🔊 Audio-only mode (no skeleton overlay)")
-    
-    # Show options
-    overlays = []
-    if skeleton:
-        overlays.append("skeleton")
-    if waveform:
-        overlays.append("waveform")
-    if phase_label and mode != "audio":
-        overlays.append("phase labels")
-    console.print(f"🎨 Overlays: {', '.join(overlays) if overlays else 'waveform only'}")
-    
-    # Import modules
-    from fairwaycut.audio.extraction import extract_audio_from_video
-    from fairwaycut.fusion.detector import detect_swings
-    from fairwaycut.video.generator import DemoVideoGenerator, DemoVideoOptions
-    from fairwaycut.core.config import Config
-    
-    config = Config.default()
-    
-    # Progress display using Rich
-    handler = RichProgressHandler(console, verbose=verbose)
-
-    try:
-        # Run detection with live progress
-        with handler.live() as h:
-            h.console.print("\n🎵 Extracting audio...")
-            audio = extract_audio_from_video(video_path)
+        # Generate 3D plot if requested
+        if plot_3d and result.pose_result and result.swings:
+            console.print("📊 Generating 3D analysis plot...")
+            from fairwaycut.pose.normalizer import PoseNormalizer
+            from fairwaycut.visualization.plot3d import plot_swing_3d, save_swing_3d_plot
             
-            mode_desc = {
-                "audio": "audio only",
-                "segments": "pose around impacts",
-                "lite": "full video (lite model)",
-                "full": "full video (full model)",
-            }
-            h.console.print(f"🔍 Detecting swings ({mode_desc[mode]})...")
-
-            result = detect_swings(
-                video_path,
-                mode=processing_mode,
-                config=config,
-                progress_callback=h.callback,
-            )
-        
-        console.print(f"\n🎯 Found [bold green]{len(result.swings)}[/bold green] swings")
-        
-        # Step 3: Generate demo video
-        console.print("🎬 Generating demo video...")
-        
-        options = DemoVideoOptions(
-            show_skeleton=skeleton,
-            show_waveform=waveform,
-            show_phase_label=phase_label,
-            show_timestamp=True,
-            show_impact_marker=True,
-        )
-        
-        generator = DemoVideoGenerator(options=options)
-        
-        # Simple progress for video generation since it's not hooked into the handler
-        from rich.progress import track
-        
-        # We need a custom callback wrapper for the generator because it expects (current, total)
-        # We'll use a manual progress bar here or just wrap the generator if possible.
-        # But DemoVideoGenerator.generate doesn't yield, it takes a callback.
-        
-        # Let's use a new Progress instance for this separate long-running task
-        from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
-        
-        with Progress(
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TimeRemainingColumn(),
-            console=console,
-            transient=True,
-        ) as video_progress:
-            task = video_progress.add_task("Rendering...", total=100) # Total is unknown initially or 100%?
-            # Generator callback provides current frame index, but we might not know total frames easily ahead of time?
-            # Actually generator.generate usually knows.
+            normalizer = PoseNormalizer()
             
-            def video_progress_callback(current: int, total: int):
-                video_progress.update(task, completed=current, total=total)
-            
-            generator.generate(
-                video_path,
-                output_path,
-                result,
-                audio,
-                progress_callback=video_progress_callback,
-            )
+            for swing in result.swings:
+                # Get frames for this swing
+                swing_frames = [
+                    f for f in result.pose_result.frames
+                    if swing.start_time <= f.timestamp <= swing.end_time
+                ]
+                
+                if swing_frames:
+                    normalized = normalizer.normalize_sequence(swing_frames)
+                    normalizer.reset()
+                    
+                    if normalized:
+                        plot_path = output_path.parent / f"{output_path.stem}_swing{swing.swing_id}_3d.png"
+                        save_swing_3d_plot(
+                            normalized,
+                            swing,
+                            plot_path,
+                            camera_views=["front", "dtl", "isometric"],
+                        )
+                        console.print(f"  ✓ Saved 3D plot: [bold user]{plot_path.name}[/bold user]")
         
-        console.print()
-        console.print(f"✅ Demo video saved: [bold user]{output_path}[/bold user]")
+        # Generate interactive 3D HTML if requested
+        if interactive_3d and result.pose_result and result.swings:
+            console.print("🎮 Generating interactive 3D viewer...")
+            from fairwaycut.pose.normalizer import PoseNormalizer
+            from fairwaycut.visualization.interactive import generate_interactive_swing_viewer
+            
+            normalizer = PoseNormalizer()
+            
+            for swing in result.swings:
+                swing_frames = [
+                    f for f in result.pose_result.frames
+                    if swing.start_time <= f.timestamp <= swing.end_time
+                ]
+                
+                if swing_frames:
+                    normalized = normalizer.normalize_sequence(swing_frames)
+                    normalizer.reset()
+                    
+                    if normalized:
+                        html_path = output_path.parent / f"{output_path.stem}_swing{swing.swing_id}_3d.html"
+                        generate_interactive_swing_viewer(
+                            normalized,
+                            swing,
+                            html_path,
+                            title=f"Swing #{swing.swing_id}",
+                        )
+                        console.print(f"  ✓ Saved interactive viewer: [bold user]{html_path.name}[/bold user]")
+                        console.print(f"    Open in browser to rotate/zoom/pan")
         
     except Exception as e:
         console.print(f"❌ Error: {e}", style="bold red")
@@ -329,6 +261,7 @@ def demo(
 @click.option("--pre-impact", type=float, default=3.0, help="Seconds before impact to include in clip")
 @click.option("--post-impact", type=float, default=2.0, help="Seconds after impact to include in clip")
 @click.option("--with-overlays/--no-overlays", default=False, help="Add visual overlays to clips")
+@click.option("--export-3d/--no-export-3d", default=False, help="Export interactive 3D viewer for each swing")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 def extract(
     video_path: str,
@@ -339,6 +272,7 @@ def extract(
     pre_impact: float,
     post_impact: float,
     with_overlays: bool,
+    export_3d: bool,
     verbose: bool,
 ):
     """
@@ -353,10 +287,9 @@ def extract(
       lite   - Full video pose with lite model
       full   - Full video pose with full model
     
-    \b
-    Examples:
       fairwaycut extract video.mp4                        # Quick extraction
       fairwaycut extract video.mp4 --with-overlays -m hybrid  # With skeleton
+      fairwaycut extract video.mp4 --export-3d            # With interactive 3D export
       fairwaycut extract video.mp4 -s 60 -e 180           # Only 1:00-3:00
     """
     from fairwaycut.core.config import ProcessingMode
@@ -429,10 +362,13 @@ def extract(
         console.print("✂️ Extracting clips...")
         
         if with_overlays:
-            # Use demo generator for overlay clips
+            # Use overlay generator for clips
             from fairwaycut.video.generator import generate_all_swing_clips, DemoVideoOptions
             
             audio = extract_audio_from_video(video_path)
+            
+
+            
             options = DemoVideoOptions(
                 show_skeleton=True,
                 show_waveform=True,
@@ -472,6 +408,35 @@ def extract(
                         console.print(f"  ✓ Swing #{swing.swing_id}: {clip_path.name}")
             
             console.print(f"\n✅ Extracted [bold green]{len(result.swings)}[/bold green] clips")
+        
+        # Step 3: Export 3D viewer if requested
+        if export_3d and result.pose_result and result.pose_result.frames:
+            console.print("🎮 Generating 3D viewers...")
+            from fairwaycut.pose.normalizer import PoseNormalizer
+            from fairwaycut.visualization.interactive import generate_interactive_swing_viewer
+            
+            normalizer = PoseNormalizer()
+            
+            for i, swing in enumerate(result.swings):
+                swing_frames = [
+                    f for f in result.pose_result.frames
+                    if swing.start_time <= f.timestamp <= swing.end_time
+                ]
+                
+                if swing_frames:
+                    normalized = normalizer.normalize_sequence(swing_frames)
+                    normalizer.reset()
+                    
+                    if normalized:
+                        html_path = output_path / f"swing_{swing.swing_id:03d}_3d.html"
+                        generate_interactive_swing_viewer(
+                            normalized,
+                            swing,
+                            html_path,
+                            title=f"Swing #{swing.swing_id}",
+                        )
+            
+            console.print(f"✅ Generated 3D viewers in [bold user]{output_path}[/bold user]")
         
         # Save manifest
         manifest_path = output_path / "manifest.json"
@@ -586,4 +551,3 @@ def info():
 
 if __name__ == "__main__":
     main()
-

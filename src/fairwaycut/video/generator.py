@@ -1,4 +1,4 @@
-"""Demo video generation with pose and audio overlays."""
+"""Video generation with pose and audio overlays."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,11 +31,12 @@ from fairwaycut.video.overlays import (
     ColorTheme,
 )
 from fairwaycut.pose.swing_phases import SwingPhasesResult
+from fairwaycut.pose.normalizer import PoseNormalizer
 
 
 @dataclass
 class DemoVideoOptions:
-    """Options for demo video generation."""
+    """Options for overlay video generation."""
     
     # What to include
     show_skeleton: bool = True
@@ -59,7 +60,7 @@ class DemoVideoOptions:
     use_enhanced_skeleton: bool = True
     skeleton_render_mode: RenderMode = field(default=RenderMode.STANDARD)
     skeleton_renderer_options: Optional[SkeletonRendererOptions] = None
-    
+
     # Output settings
     output_fps: Optional[float] = None  # None = match input
     output_codec: str = "mp4v"
@@ -68,7 +69,7 @@ class DemoVideoOptions:
 
 class DemoVideoGenerator:
     """
-    Generate demonstration videos with pose and audio overlays.
+    Generate videos with pose and audio overlays.
     
     This class takes a source video and fusion results to create
     a new video with visual overlays showing:
@@ -76,6 +77,8 @@ class DemoVideoGenerator:
     - Audio waveform with impact markers
     - Current swing phase label
     - Impact flash indicator
+    - Optional 3D pose viewer (side-by-side or inset)
+    - Optional voxel motion volume
     """
     
     def __init__(
@@ -84,7 +87,7 @@ class DemoVideoGenerator:
         config: Optional[VideoConfig] = None,
     ):
         """
-        Initialize the demo video generator.
+        Initialize the overlay video generator.
         
         Args:
             options: DemoVideoOptions for customization.
@@ -114,7 +117,13 @@ class DemoVideoGenerator:
                 renderer_opts.joint_radius = self.options.landmark_radius
                 renderer_opts.golf_mode = self.options.golf_mode
             
+                renderer_opts.golf_mode = self.options.golf_mode
+            
             self._skeleton_renderer = SkeletonRenderer(options=renderer_opts)
+            
+        self._composite_renderer = None
+        self._pose_normalizer = None
+
     
     def generate(
         self,
@@ -126,7 +135,7 @@ class DemoVideoGenerator:
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Path:
         """
-        Generate a demo video with overlays.
+        Generate a video with overlays.
         
         Args:
             video_path: Path to source video.
@@ -341,6 +350,8 @@ class DemoVideoGenerator:
         
         return expanded
     
+
+    
     def generate_swing_clip(
         self,
         video_path: str | Path,
@@ -352,7 +363,7 @@ class DemoVideoGenerator:
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Path:
         """
-        Generate a demo clip for a single swing.
+        Generate a clip for a single swing.
         
         Args:
             video_path: Path to source video.
@@ -411,6 +422,12 @@ class DemoVideoGenerator:
             if self._skeleton_renderer:
                 self._skeleton_renderer.reset()
             
+            # Reset 3D components for fresh history
+            if self._composite_renderer:
+                self._composite_renderer.reset()
+            if self._pose_normalizer:
+                self._pose_normalizer.reset()
+            
             # Get audio segment
             audio_segment = audio.get_segment(swing.start_time, swing.end_time)
             
@@ -467,38 +484,6 @@ class DemoVideoGenerator:
         return output_path
 
 
-def generate_demo_video(
-    video_path: str | Path,
-    output_path: str | Path,
-    fusion_result: FusionResult,
-    audio: AudioData,
-    options: Optional[DemoVideoOptions] = None,
-    progress_callback: Optional[Callable[[int, int], None]] = None,
-) -> Path:
-    """
-    Convenience function to generate a demo video.
-    
-    Args:
-        video_path: Path to source video.
-        output_path: Path for output video.
-        fusion_result: FusionResult with detection data.
-        audio: AudioData for waveform.
-        options: Optional DemoVideoOptions.
-        progress_callback: Optional callback(current, total).
-    
-    Returns:
-        Path to the generated video.
-    """
-    generator = DemoVideoGenerator(options=options)
-    return generator.generate(
-        video_path,
-        output_path,
-        fusion_result,
-        audio,
-        progress_callback=progress_callback,
-    )
-
-
 def generate_all_swing_clips(
     video_path: str | Path,
     output_dir: str | Path,
@@ -550,4 +535,3 @@ def generate_all_swing_clips(
         clips.append(clip_path)
     
     return clips
-

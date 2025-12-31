@@ -1,4 +1,4 @@
-"""Video processing, overlays, and demo video generation."""
+"""Video processing and overlays."""
 
 from fairwaycut.video.extraction import (
     extract_frames,
@@ -20,7 +20,6 @@ from fairwaycut.video.overlays import (
 from fairwaycut.video.generator import (
     DemoVideoGenerator,
     DemoVideoOptions,
-    generate_demo_video,
     generate_all_swing_clips,
 )
 
@@ -43,7 +42,5 @@ __all__ = [
     # Video generation
     "DemoVideoGenerator",
     "DemoVideoOptions",
-    "generate_demo_video",
     "generate_all_swing_clips",
 ]
-
