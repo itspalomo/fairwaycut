@@ -5,11 +5,37 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-import click
+
 
 from fairwaycut import __version__
 from fairwaycut.core.config import Config
 from fairwaycut.core.models import SwingPhase
+import rich_click as click
+
+# Rich Click Configuration
+click.rich_click.USE_RICH_MARKUP = True
+click.rich_click.STYLE_HELPTEXT = "dim"
+click.rich_click.STYLE_OPTION = "bold cyan"
+click.rich_click.STYLE_SWITCH = "bold green"
+click.rich_click.STYLE_METAVAR = "bold yellow"
+click.rich_click.SHOW_METAVARS_COLUMN = False
+click.rich_click.APPEND_METAVARS_HELP = True
+click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
+click.rich_click.SHOW_ARGUMENTS = True
+
+# Define option groups for cleaner help
+click.rich_click.OPTION_GROUPS = {
+    "fairwaycut analyze": [
+        {"name": "Input/Output", "options": ["--output", "--verbose"]},
+        {"name": "Processing Options", "options": ["--mode", "--start", "--end", "--min-gap"]},
+        {"name": "3D Export Options", "options": ["--export-3d-poses", "--plot-3d", "--interactive-3d", "--camera-3d"]},
+    ],
+    "fairwaycut extract": [
+        {"name": "Input/Output", "options": ["--output-dir", "--verbose"]},
+        {"name": "Processing Options", "options": ["--mode", "--start", "--end", "--pre-impact", "--post-impact"]},
+        {"name": "Export Details", "options": ["--with-overlays", "--export-3d"]},
+    ],
+}
 
 
 from fairwaycut.ui import console, print_banner, print_swing_summary, RichProgressHandler
@@ -24,26 +50,33 @@ def main():
 
 @main.command()
 @click.argument("video_path", type=click.Path(exists=True))
-@click.option("--output", "-o", type=click.Path(), help="Output JSON report path")
+@click.option(
+    "--output", "-o",
+    type=click.Path(),
+    help="Output JSON report path",
+    show_default="video directory/<name>_report.json",
+)
 @click.option(
     "--mode", "-m",
     type=click.Choice(["audio", "hybrid", "lite", "full"]),
     default="hybrid",
-    help="Processing mode: audio (fastest), hybrid (audio + targeted pose), lite (full video, fast model), full (full video, accurate model)"
+    show_default=True,
+    help="Processing mode: audio (fastest), hybrid (audio + targeted pose), lite (full video, fast model), full (full video, accurate model)",
 )
-@click.option("--start", "-s", type=float, default=0.0, help="Start time in seconds")
-@click.option("--end", "-e", type=float, default=None, help="End time in seconds (default: video end)")
-@click.option("--min-gap", type=float, default=3.0, help="Minimum gap between swings (seconds)")
-@click.option("--export-3d-poses/--no-3d-poses", default=False, help="Include normalized 3D poses in JSON report")
-@click.option("--plot-3d/--no-plot-3d", default=False, help="Generate 3D swing analysis plot (static PNG)")
-@click.option("--interactive-3d/--no-interactive-3d", default=False, help="Generate interactive 3D HTML viewer (rotatable)")
+@click.option("--start", "-s", type=float, default=0.0, show_default=True, help="Start time in seconds")
+@click.option("--end", "-e", type=float, default=None, show_default="video end", help="End time in seconds")
+@click.option("--min-gap", type=float, default=3.0, show_default=True, help="Minimum gap between swings (seconds)")
+@click.option("--export-3d-poses/--no-3d-poses", default=False, show_default=True, help="Include normalized 3D poses in JSON report")
+@click.option("--plot-3d/--no-plot-3d", default=False, show_default=True, help="Generate 3D swing analysis plot (static PNG)")
+@click.option("--interactive-3d/--no-interactive-3d", default=False, show_default=True, help="Generate interactive 3D HTML viewer (rotatable)")
 @click.option(
     "--camera-3d",
     type=click.Choice(["front", "dtl", "isometric"]),
     default="isometric",
-    help="Camera angle for 3D plot"
+    show_default=True,
+    help="Camera angle for 3D plot",
 )
-@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+@click.option("--verbose", "-v", is_flag=True, show_default=True, help="Verbose output")
 def analyze(
     video_path: str,
     output: Optional[str],
@@ -162,7 +195,8 @@ def analyze(
             from fairwaycut.pose.normalizer import PoseNormalizer, normalize_poses_for_export
             
             # Export normalized poses for each swing
-            for i, swing in enumerate(result.swings):
+            from rich.progress import track
+            for i, swing in enumerate(track(result.swings, description="Normalizing poses...")):
                 # Get frames for this swing
                 swing_frames = [
                     f for f in result.pose_result.frames
@@ -189,7 +223,8 @@ def analyze(
             
             normalizer = PoseNormalizer()
             
-            for swing in result.swings:
+            from rich.progress import track
+            for swing in track(result.swings, description="Generating 3D plots..."):
                 # Get frames for this swing
                 swing_frames = [
                     f for f in result.pose_result.frames
@@ -208,7 +243,10 @@ def analyze(
                             plot_path,
                             camera_views=["front", "dtl", "isometric"],
                         )
-                        console.print(f"  ✓ Saved 3D plot: [bold user]{plot_path.name}[/bold user]")
+                        if verbose:
+                            console.print(f"  ✓ Saved 3D plot: [bold user]{plot_path.name}[/bold user]")
+            if not verbose:
+                console.print(f"  ✓ Saved {len(result.swings)} 3D plots")
         
         # Generate interactive 3D HTML if requested
         if interactive_3d and result.pose_result and result.swings:
@@ -218,7 +256,8 @@ def analyze(
             
             normalizer = PoseNormalizer()
             
-            for swing in result.swings:
+            from rich.progress import track
+            for swing in track(result.swings, description="Generating interactive viewers..."):
                 swing_frames = [
                     f for f in result.pose_result.frames
                     if swing.start_time <= f.timestamp <= swing.end_time
@@ -236,8 +275,9 @@ def analyze(
                             html_path,
                             title=f"Swing #{swing.swing_id}",
                         )
-                        console.print(f"  ✓ Saved interactive viewer: [bold user]{html_path.name}[/bold user]")
-                        console.print(f"    Open in browser to rotate/zoom/pan")
+            
+            console.print(f"  ✓ Saved interactive viewers")
+            console.print(f"    Open in browser to rotate/zoom/pan")
         
     except Exception as e:
         console.print(f"❌ Error: {e}", style="bold red")
@@ -249,20 +289,26 @@ def analyze(
 
 @main.command()
 @click.argument("video_path", type=click.Path(exists=True))
-@click.option("--output-dir", "-o", type=click.Path(), help="Output directory for clips")
+@click.option(
+    "--output-dir", "-o",
+    type=click.Path(),
+    help="Output directory for clips",
+    show_default="video directory/<name>_swings",
+)
 @click.option(
     "--mode", "-m",
     type=click.Choice(["audio", "hybrid", "lite", "full"]),
     default="audio",
-    help="Processing mode: audio (fastest), hybrid (audio + pose), lite, full"
+    show_default=True,
+    help="Processing mode: audio (fastest), hybrid (audio + pose), lite, full",
 )
-@click.option("--start", "-s", type=float, default=0.0, help="Start time in seconds")
-@click.option("--end", "-e", type=float, default=None, help="End time in seconds (default: video end)")
-@click.option("--pre-impact", type=float, default=3.0, help="Seconds before impact to include in clip")
-@click.option("--post-impact", type=float, default=2.0, help="Seconds after impact to include in clip")
-@click.option("--with-overlays/--no-overlays", default=False, help="Add visual overlays to clips")
-@click.option("--export-3d/--no-export-3d", default=False, help="Export interactive 3D viewer for each swing")
-@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+@click.option("--start", "-s", type=float, default=0.0, show_default=True, help="Start time in seconds")
+@click.option("--end", "-e", type=float, default=None, show_default="video end", help="End time in seconds")
+@click.option("--pre-impact", type=float, default=3.0, show_default=True, help="Seconds before impact to include in clip")
+@click.option("--post-impact", type=float, default=2.0, show_default=True, help="Seconds after impact to include in clip")
+@click.option("--with-overlays/--no-overlays", default=False, show_default=True, help="Add visual overlays to clips")
+@click.option("--export-3d/--no-export-3d", default=False, show_default=True, help="Export interactive 3D viewer for each swing")
+@click.option("--verbose", "-v", is_flag=True, show_default=True, help="Verbose output")
 def extract(
     video_path: str,
     output_dir: Optional[str],
@@ -375,14 +421,41 @@ def extract(
                 show_phase_label=True,
             )
             
-            clips = generate_all_swing_clips(
-                video_path,
-                output_path,
-                result,
-                audio,
-                options=options,
-            )
+            from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
             
+            # Create a custom progress display for generation
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                console=console,
+            ) as progress:
+                # Main task for swings
+                swing_task = progress.add_task(f"Generating clips (0/{len(result.swings)})", total=len(result.swings))
+                # Sub-task for frames (initially hidden or just waiting)
+                frame_task = progress.add_task("Rendering frames", total=100, visible=False)
+                
+                def generation_progress(status: str, current: int, total: int):
+                    if status.endswith("_frames"):
+                        # Update frame progress
+                        if not progress.tasks[frame_task].visible:
+                            progress.update(frame_task, visible=True)
+                        progress.update(frame_task, completed=current, total=total)
+                    elif status.startswith("swing_"):
+                        # Start of a new swing
+                        progress.update(swing_task, completed=current, description=f"Generating clips ({current+1}/{total})")
+                        # Reset frame task for new swing
+                        progress.update(frame_task, completed=0, total=100, visible=True)
+                
+                clips = generate_all_swing_clips(
+                    video_path,
+                    output_path,
+                    result,
+                    audio,
+                    options=options,
+                    progress_callback=generation_progress,
+                )
             
             console.print(f"\n✅ Extracted [bold green]{len(clips)}[/bold green] clips with overlays")
         else:
@@ -417,7 +490,8 @@ def extract(
             
             normalizer = PoseNormalizer()
             
-            for i, swing in enumerate(result.swings):
+            from rich.progress import track
+            for i, swing in enumerate(track(result.swings, description="Generating 3D viewers...")):
                 swing_frames = [
                     f for f in result.pose_result.frames
                     if swing.start_time <= f.timestamp <= swing.end_time
@@ -461,8 +535,13 @@ def extract(
 
 @main.command()
 @click.argument("video_path", type=click.Path(exists=True))
-@click.option("--output", "-o", type=click.Path(), help="Output image path")
-@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+@click.option(
+    "--output", "-o",
+    type=click.Path(),
+    help="Output image path",
+    show_default="video directory/<name>_analysis.png",
+)
+@click.option("--verbose", "-v", is_flag=True, show_default=True, help="Verbose output")
 def plot(
     video_path: str,
     output: Optional[str],

@@ -400,3 +400,4 @@ def save_swing_3d_plot(
     plt.close(fig)
     return output_path
 
+

@@ -388,3 +388,4 @@ def composite_frame(
     with CompositeRenderer(options) as renderer:
         return renderer.render(video_frame, pose)
 
+
