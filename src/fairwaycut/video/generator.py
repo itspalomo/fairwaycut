@@ -120,6 +120,9 @@ class DemoVideoGenerator:
                 renderer_opts.golf_mode = self.options.golf_mode
             
             self._skeleton_renderer = SkeletonRenderer(options=renderer_opts)
+            
+        self._composite_renderer = None
+        self._pose_normalizer = None
 
     
     def generate(

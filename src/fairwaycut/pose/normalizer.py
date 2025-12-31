@@ -58,11 +58,9 @@ MEDIAPIPE_TO_NORMALIZED = {
 
 # Skeleton connections for 3D rendering (parent -> child relationships)
 SKELETON_CONNECTIONS_3D = [
-    # Torso
-    (0, 1),   # hip_center -> left_hip
-    (0, 2),   # hip_center -> right_hip
-    (0, 3),   # hip_center -> left_shoulder (via spine, simplified)
-    (0, 4),   # hip_center -> right_shoulder
+    # Torso (Box style to match overlay)
+    (3, 1),   # left_shoulder -> left_hip
+    (4, 2),   # right_shoulder -> right_hip
     (3, 4),   # left_shoulder -> right_shoulder
     (1, 2),   # left_hip -> right_hip
     
@@ -225,9 +223,12 @@ class PoseNormalizer:
         # Scale to unit torso height
         joints = self._scale_pose(joints)
         
-        # Flip z-axis if needed
+        # Flip z-axis if needed (MediaPipe z is negative for closer)
         if self.flip_z:
             joints[:, 2] = -joints[:, 2]
+            
+        # Flip y-axis (Convert Screen Y-Down to 3D Y-Up)
+        joints[:, 1] = -joints[:, 1]
         
         # Compute velocities
         velocities = self._compute_velocities(joints, pose.timestamp)
