@@ -20,6 +20,26 @@ Before (raw range video) vs after (auto-cut clip with skeleton, waveform, and ph
 | --- | --- |
 | ![Before](docs/assets/before_raw.jpg) | ![After](docs/assets/after_overlay.jpg) |
 
+## Audio Analysis
+
+FairwayCut uses advanced audio signal processing to detect impact sounds. You can visualize this analysis using the `plot` command.
+
+### Signal Analysis
+The analysis plot visualizes the audio waveform and spectral flux used to detect candidate swings.
+
+![Audio Analysis Plot](docs/assets/audio_analysis_plot.png)
+
+- **Waveform**: The raw audio signal amplitude.
+- **Onset Strength**: The rate of change in the spectral magnitude, used to detect percussive events.
+- **Candidates**: Red dashed lines indicate detected potential impacts based on adaptive thresholding.
+
+### Transient Detail
+The transient analysis provides a zoomed-in view of the spectral characteristics around a detected impact.
+
+![Transient Analysis](docs/assets/audio_transients_plot.png)
+
+This visualization shows the spectrogram and flux around the impact, helping to verify the "sharpness" and spectral content of the sound (the "crack" of the club).
+
 ## Key Features
 
 - **Local & Privacy-Focused**: Runs entirely on your machine. No cloud uploads.
