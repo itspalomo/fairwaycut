@@ -237,7 +237,11 @@ def detect_impacts_transient(
     rms_db = librosa.amplitude_to_db(rms, ref=np.max(rms))
     
     # Time axis
-    times = librosa.frames_to_time(np.arange(min_len), sr=audio.sample_rate, hop_length=hop_length)
+    times = librosa.frames_to_time(
+        np.arange(min_len),
+        sr=audio.sample_rate,
+        hop_length=hop_length,
+    ) + audio.start_time
     
     # Calculate minimum distance between peaks in frames
     min_distance_frames = int(min_gap_sec * audio.sample_rate / hop_length)
@@ -357,7 +361,11 @@ def detect_impacts_adaptive_snr(
     rms_db = librosa.amplitude_to_db(rms, ref=np.max(rms))
     
     # Time axis
-    times = librosa.frames_to_time(np.arange(min_len), sr=audio.sample_rate, hop_length=hop_length)
+    times = librosa.frames_to_time(
+        np.arange(min_len),
+        sr=audio.sample_rate,
+        hop_length=hop_length,
+    ) + audio.start_time
     
     # Compute local background using rolling median
     window_frames = int(local_window_sec * audio.sample_rate / hop_length)
@@ -450,4 +458,3 @@ def detect_impacts_adaptive_snr(
         envelope_times=env_times,
         envelope_db=envelope_db[:len(env_times)],
     )
-

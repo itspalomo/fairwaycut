@@ -2,6 +2,7 @@
 
 from fairwaycut.video.extraction import (
     extract_frames,
+    extract_video_clip,
     get_video_info,
     VideoInfo,
 )
@@ -26,6 +27,7 @@ from fairwaycut.video.generator import (
 __all__ = [
     # Extraction
     "extract_frames",
+    "extract_video_clip",
     "get_video_info",
     "VideoInfo",
     # Basic overlays

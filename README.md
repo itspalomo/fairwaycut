@@ -82,11 +82,9 @@ uv sync
 ```
 
 ### Apple Silicon Acceleration
-For hardware-accelerated pose estimation on macOS:
-
-```bash
-uv sync --extra apple
-```
+On supported macOS systems, Apple Vision dependencies install automatically during
+`uv sync` and FairwayCut will route pose estimation to Apple Vision by default.
+Other platforms continue to use MediaPipe automatically.
 
 ## Quick Start
 

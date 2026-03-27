@@ -125,8 +125,8 @@ class AppleVisionBackend(PoseBackend):
         if not APPLE_VISION_AVAILABLE:
             raise ImportError(
                 "Apple Vision framework is not available. "
-                "This backend requires macOS 11+ and pyobjc-framework-Vision. "
-                "Install with: pip install pyobjc-framework-Vision"
+                "This backend requires macOS 11+ plus the PyObjC Vision and Quartz frameworks. "
+                "Install with: pip install pyobjc-framework-Vision pyobjc-framework-Quartz"
             )
         
         self.max_frame_size = max_frame_size
@@ -472,8 +472,86 @@ class AppleVisionBackend(PoseBackend):
             video_duration=end_time - start_time,
             source_file=str(video_path),
         )
+
+    def process_video_segments(
+        self,
+        video_path: str | Path,
+        segments: list[tuple[float, float]],
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        process_every_n: int = 1,
+    ) -> list[PoseAnalysisResult]:
+        """Process multiple video segments while reusing one open capture."""
+        video_path = Path(video_path)
+
+        if not video_path.exists():
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+
+        if not segments:
+            return []
+
+        cap = cv2.VideoCapture(str(video_path))
+
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video: {video_path}")
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_segment_frames = sum(
+            max(0, int(end_time * fps) - int(start_time * fps))
+            for start_time, end_time in segments
+        )
+        processed_frames = 0
+        results: list[PoseAnalysisResult] = []
+
+        try:
+            for start_time, end_time in segments:
+                start_frame = int(start_time * fps)
+                end_frame = int(end_time * fps)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+                frames: list[FramePose] = []
+                frame_index = start_frame
+
+                while cap.isOpened() and frame_index < end_frame:
+                    ret, frame = cap.read()
+
+                    if not ret:
+                        break
+
+                    timestamp = frame_index / fps if fps > 0 else 0
+
+                    if (frame_index - start_frame) % process_every_n == 0:
+                        pose = self.process_frame(frame, frame_index, timestamp)
+                        frames.append(pose)
+                    else:
+                        frames.append(
+                            FramePose(
+                                frame_index=frame_index,
+                                timestamp=timestamp,
+                                landmarks=[],
+                                confidence=0.0,
+                            )
+                        )
+
+                    frame_index += 1
+                    processed_frames += 1
+
+                    if progress_callback and processed_frames % 30 == 0:
+                        progress_callback(processed_frames, total_segment_frames)
+
+                results.append(
+                    PoseAnalysisResult(
+                        frames=frames,
+                        fps=fps,
+                        total_frames=len(frames),
+                        video_duration=end_time - start_time,
+                        source_file=str(video_path),
+                    )
+                )
+        finally:
+            cap.release()
+
+        return results
     
     def close(self) -> None:
         """Release any resources (Apple Vision doesn't require explicit cleanup)."""
         pass
-

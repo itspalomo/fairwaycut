@@ -3,20 +3,24 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable
+from uuid import uuid4
 import cv2
 import numpy as np
 
 from fairwaycut.core.models import (
     AudioData,
+    DetectionResult,
     FramePose,
     SwingPhase,
     SwingEvent,
     FusionResult,
-    PoseAnalysisResult,
-    DetectionResult,
 )
 from fairwaycut.core.config import VideoConfig
-from fairwaycut.video.extraction import get_video_info, VideoInfo
+from fairwaycut.video.extraction import (
+    attach_audio_to_video,
+    get_video_info,
+    VideoInfo,
+)
 from fairwaycut.video.overlays import (
     draw_pose_skeleton,
     draw_audio_waveform,
@@ -28,10 +32,9 @@ from fairwaycut.video.overlays import (
     SkeletonRenderer,
     SkeletonRendererOptions,
     RenderMode,
-    ColorTheme,
+    build_waveform_strip_sequence,
 )
 from fairwaycut.pose.swing_phases import SwingPhasesResult
-from fairwaycut.pose.normalizer import PoseNormalizer
 
 
 @dataclass
@@ -65,6 +68,16 @@ class DemoVideoOptions:
     output_fps: Optional[float] = None  # None = match input
     output_codec: str = "mp4v"
     quality: int = 23
+
+
+@dataclass
+class SwingClipContext:
+    """Shared state reused while generating multiple swing clips."""
+
+    info: VideoInfo
+    pose_by_frame: dict[int, FramePose]
+    impact_events: list
+    waveform_strips: Optional[list[np.ndarray]] = None
 
 
 class DemoVideoGenerator:
@@ -124,6 +137,10 @@ class DemoVideoGenerator:
         self._composite_renderer = None
         self._pose_normalizer = None
 
+    def _temporary_render_path(self, output_path: Path) -> Path:
+        """Create a temporary path for silent intermediate video renders."""
+        return output_path.parent / f".{output_path.stem}.{uuid4().hex}{output_path.suffix}"
+
     
     def generate(
         self,
@@ -151,6 +168,7 @@ class DemoVideoGenerator:
         video_path = Path(video_path)
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_output_path = self._temporary_render_path(output_path)
         
         # Get video info
         info = get_video_info(video_path)
@@ -171,7 +189,7 @@ class DemoVideoGenerator:
         # Create video writer
         fourcc = cv2.VideoWriter_fourcc(*self.options.output_codec)
         writer = cv2.VideoWriter(
-            str(output_path),
+            str(temp_output_path),
             fourcc,
             fps,
             (info.width, output_height),
@@ -238,13 +256,20 @@ class DemoVideoGenerator:
                 
                 # Add waveform strip if enabled
                 if self.options.show_waveform:
-                    frame = self._add_waveform_strip(
-                        frame,
-                        info,
-                        timestamp,
-                        audio,
-                        audio_result.events,
+                    waveform_strip = np.zeros(
+                        (self.options.waveform_height, info.width, 3),
+                        dtype=np.uint8,
                     )
+                    draw_audio_waveform(
+                        waveform_strip,
+                        audio,
+                        timestamp,
+                        window_sec=self.options.waveform_window_sec,
+                        height=self.options.waveform_height,
+                        impact_events=audio_result.events,
+                        position="top",
+                    )
+                    frame = self._append_waveform_strip(frame, waveform_strip)
                 
                 # Write frame
                 writer.write(frame)
@@ -258,7 +283,15 @@ class DemoVideoGenerator:
         finally:
             cap.release()
             writer.release()
-        
+
+        attach_audio_to_video(
+            temp_output_path,
+            video_path,
+            output_path,
+            start_time=0.0,
+            end_time=info.duration,
+        )
+
         return output_path
     
     def _apply_overlays(
@@ -318,35 +351,18 @@ class DemoVideoGenerator:
         
         return frame
     
-    def _add_waveform_strip(
+    def _append_waveform_strip(
         self,
         frame: np.ndarray,
-        info: VideoInfo,
-        timestamp: float,
-        audio: AudioData,
-        impact_events: list,
+        waveform_strip: np.ndarray,
     ) -> np.ndarray:
-        """Add waveform strip below the video frame."""
+        """Append a pre-rendered waveform strip below the video frame."""
         h, w = frame.shape[:2]
-        waveform_height = self.options.waveform_height
         
         # Create expanded frame
-        expanded = np.zeros((h + waveform_height, w, 3), dtype=np.uint8)
+        expanded = np.zeros((h + waveform_strip.shape[0], w, 3), dtype=np.uint8)
         expanded[:h, :] = frame
-        
-        # Draw waveform in the bottom strip
-        waveform_strip = expanded[h:, :]
-        
-        # Draw waveform
-        draw_audio_waveform(
-            waveform_strip,
-            audio,
-            timestamp,
-            window_sec=self.options.waveform_window_sec,
-            height=waveform_height,
-            impact_events=impact_events,
-            position="top",  # Fill entire strip
-        )
+        expanded[h:, :] = waveform_strip
         
         return expanded
     
@@ -361,6 +377,7 @@ class DemoVideoGenerator:
         audio: AudioData,
         phases_result: Optional[SwingPhasesResult] = None,
         progress_callback: Optional[Callable[[int, int], None]] = None,
+        context: Optional[SwingClipContext] = None,
     ) -> Path:
         """
         Generate a clip for a single swing.
@@ -380,24 +397,47 @@ class DemoVideoGenerator:
         video_path = Path(video_path)
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        info = get_video_info(video_path)
+        temp_output_path = self._temporary_render_path(output_path)
+        info = context.info if context else get_video_info(video_path)
         
         # Calculate frame range
         start_frame = int(swing.start_time * info.fps)
         end_frame = int(swing.end_time * info.fps)
         
         # Build pose lookup by frame index for efficient access
-        pose_by_frame: dict[int, FramePose] = {}
-        if fusion_result.pose_result and fusion_result.pose_result.frames:
-            for pose_frame in fusion_result.pose_result.frames:
-                pose_by_frame[pose_frame.frame_index] = pose_frame
-        
+        pose_by_frame = context.pose_by_frame if context else {}
+        if not pose_by_frame and fusion_result.pose_result and fusion_result.pose_result.frames:
+            pose_by_frame = {
+                pose_frame.frame_index: pose_frame
+                for pose_frame in fusion_result.pose_result.frames
+            }
+
+        impact_events = context.impact_events if context else [
+            event
+            for event in fusion_result.audio_result.events
+            if swing.start_time <= event.timestamp <= swing.end_time
+        ]
+
         # Build phases dict from phases_result
         phases_by_frame: dict[int, SwingPhase] = {}
         if phases_result:
             for i, phase in enumerate(phases_result.frame_phases):
                 phases_by_frame[start_frame + i] = phase
+
+        waveform_strips = context.waveform_strips if context else None
+        if self.options.show_waveform and waveform_strips is None:
+            timestamps = [
+                frame_number / info.fps
+                for frame_number in range(start_frame, end_frame)
+            ]
+            waveform_strips = build_waveform_strip_sequence(
+                audio,
+                timestamps=timestamps,
+                frame_width=info.width,
+                window_sec=self.options.waveform_window_sec,
+                height=self.options.waveform_height,
+                impact_events=impact_events,
+            )
         
         # Open source video
         cap = cv2.VideoCapture(str(video_path))
@@ -411,7 +451,7 @@ class DemoVideoGenerator:
         fps = self.options.output_fps or info.fps
         fourcc = cv2.VideoWriter_fourcc(*self.options.output_codec)
         writer = cv2.VideoWriter(
-            str(output_path),
+            str(temp_output_path),
             fourcc,
             fps,
             (info.width, output_height),
@@ -427,9 +467,6 @@ class DemoVideoGenerator:
                 self._composite_renderer.reset()
             if self._pose_normalizer:
                 self._pose_normalizer.reset()
-            
-            # Get audio segment
-            audio_segment = audio.get_segment(swing.start_time, swing.end_time)
             
             frame_index = start_frame
             total_frames = end_frame - start_frame
@@ -459,15 +496,8 @@ class DemoVideoGenerator:
                     fusion_result.audio_result,
                 )
                 
-                if self.options.show_waveform:
-                    frame = self._add_waveform_strip(
-                        frame,
-                        info,
-                        timestamp,
-                        audio,
-                        [e for e in fusion_result.audio_result.events
-                         if swing.start_time <= e.timestamp <= swing.end_time],
-                    )
+                if self.options.show_waveform and waveform_strips is not None:
+                    frame = self._append_waveform_strip(frame, waveform_strips[processed])
                 
                 writer.write(frame)
                 
@@ -480,7 +510,15 @@ class DemoVideoGenerator:
         finally:
             cap.release()
             writer.release()
-        
+
+        attach_audio_to_video(
+            temp_output_path,
+            video_path,
+            output_path,
+            start_time=swing.start_time,
+            end_time=swing.end_time,
+        )
+
         return output_path
 
 
@@ -512,12 +550,49 @@ def generate_all_swing_clips(
     
     generator = DemoVideoGenerator(options=options)
     clips = []
+    info = get_video_info(video_path)
+    pose_by_frame: dict[int, FramePose] = {}
+    if fusion_result.pose_result and fusion_result.pose_result.frames:
+        pose_by_frame = {
+            pose_frame.frame_index: pose_frame
+            for pose_frame in fusion_result.pose_result.frames
+        }
+    impact_events_by_swing = {
+        swing.swing_id: [
+            event
+            for event in fusion_result.audio_result.events
+            if swing.start_time <= event.timestamp <= swing.end_time
+        ]
+        for swing in fusion_result.swings
+    }
     
     for i, swing in enumerate(fusion_result.swings):
         if progress_callback:
             progress_callback(f"swing_{swing.swing_id}", i, len(fusion_result.swings))
         
         output_path = output_dir / f"swing_{swing.swing_id:03d}.mp4"
+        start_frame = int(swing.start_time * info.fps)
+        end_frame = int(swing.end_time * info.fps)
+        timestamps = [
+            frame_number / info.fps
+            for frame_number in range(start_frame, end_frame)
+        ]
+        waveform_strips = None
+        if generator.options.show_waveform:
+            waveform_strips = build_waveform_strip_sequence(
+                audio,
+                timestamps=timestamps,
+                frame_width=info.width,
+                window_sec=generator.options.waveform_window_sec,
+                height=generator.options.waveform_height,
+                impact_events=impact_events_by_swing[swing.swing_id],
+            )
+        context = SwingClipContext(
+            info=info,
+            pose_by_frame=pose_by_frame,
+            impact_events=impact_events_by_swing[swing.swing_id],
+            waveform_strips=waveform_strips,
+        )
         
         def frame_progress(current: int, total: int):
             if progress_callback:
@@ -530,6 +605,7 @@ def generate_all_swing_clips(
             fusion_result,
             audio,
             progress_callback=frame_progress,
+            context=context,
         )
         
         clips.append(clip_path)

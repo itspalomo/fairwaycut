@@ -9,7 +9,6 @@ dependencies = [
     "librosa>=0.10.2",
     "numpy>=1.26.0",
     "matplotlib>=3.8.0",
-    "moviepy>=1.0.3",
     "scipy>=1.12.0",
     "click>=8.1.7",
     "soundfile>=0.12.1",
@@ -17,13 +16,11 @@ dependencies = [
     "opencv-python>=4.8.0",
     "rich>=14.2.0",
     "rich-click>=1.7.0",
+    "pyobjc-framework-Vision>=10.0; platform_system == 'Darwin'",
+    "pyobjc-framework-Quartz>=10.0; platform_system == 'Darwin'",
 ]
 
 [project.optional-dependencies]
-apple = [
-    "pyobjc-framework-Vision>=10.0",
-    "pyobjc-framework-Quartz>=10.0",
-]
 interactive = [
     "plotly>=5.18.0",
 ]
@@ -43,4 +40,3 @@ dev = [
     "pytest>=8.0.0",
     "ruff>=0.3.0",
 ]
-

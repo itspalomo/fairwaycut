@@ -64,7 +64,7 @@ def plot_waveform(
     ax.set_ylabel("Amplitude")
     ax.set_title(title or f"Audio Waveform - {Path(audio.source_file).name}")
     ax.grid(True, alpha=0.3)
-    ax.set_xlim(0, audio.duration)
+    ax.set_xlim(audio.start_time, audio.end_time)
 
     fig.tight_layout()
     return fig
@@ -138,7 +138,7 @@ def plot_envelope(
     ax.set_title(title or f"Audio Envelope - {Path(audio.source_file).name}")
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(True, alpha=0.3)
-    ax.set_xlim(0, audio.duration)
+    ax.set_xlim(audio.start_time, audio.end_time)
 
     fig.tight_layout()
     return fig
@@ -218,7 +218,11 @@ def plot_analysis(
     spec = np.abs(librosa.stft(audio.samples, hop_length=hop_length))
     spectral_flux = np.sqrt(np.mean(np.diff(spec, axis=1)**2, axis=0))
     spectral_flux = np.concatenate([[0], spectral_flux])
-    flux_times = librosa.frames_to_time(np.arange(len(spectral_flux)), sr=audio.sample_rate, hop_length=hop_length)
+    flux_times = librosa.frames_to_time(
+        np.arange(len(spectral_flux)),
+        sr=audio.sample_rate,
+        hop_length=hop_length,
+    ) + audio.start_time
     
     FLUX_COLOR = "#00d9ff"
     
@@ -259,7 +263,7 @@ def plot_analysis(
     
     # Set x-axis limits for all plots
     for ax in axes:
-        ax.set_xlim(0, audio.duration)
+        ax.set_xlim(audio.start_time, audio.end_time)
 
     # Add overall title
     source_name = Path(audio.source_file).name
@@ -375,4 +379,3 @@ def save_figure(fig: Figure, output_path: str | Path, dpi: int = 150) -> Path:
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
     return output_path
-
