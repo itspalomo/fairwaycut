@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable
+from uuid import uuid4
 import cv2
 import numpy as np
 
@@ -15,7 +16,11 @@ from fairwaycut.core.models import (
     FusionResult,
 )
 from fairwaycut.core.config import VideoConfig
-from fairwaycut.video.extraction import get_video_info, VideoInfo
+from fairwaycut.video.extraction import (
+    attach_audio_to_video,
+    get_video_info,
+    VideoInfo,
+)
 from fairwaycut.video.overlays import (
     draw_pose_skeleton,
     draw_audio_waveform,
@@ -132,6 +137,10 @@ class DemoVideoGenerator:
         self._composite_renderer = None
         self._pose_normalizer = None
 
+    def _temporary_render_path(self, output_path: Path) -> Path:
+        """Create a temporary path for silent intermediate video renders."""
+        return output_path.parent / f".{output_path.stem}.{uuid4().hex}{output_path.suffix}"
+
     
     def generate(
         self,
@@ -159,6 +168,7 @@ class DemoVideoGenerator:
         video_path = Path(video_path)
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_output_path = self._temporary_render_path(output_path)
         
         # Get video info
         info = get_video_info(video_path)
@@ -179,7 +189,7 @@ class DemoVideoGenerator:
         # Create video writer
         fourcc = cv2.VideoWriter_fourcc(*self.options.output_codec)
         writer = cv2.VideoWriter(
-            str(output_path),
+            str(temp_output_path),
             fourcc,
             fps,
             (info.width, output_height),
@@ -273,7 +283,15 @@ class DemoVideoGenerator:
         finally:
             cap.release()
             writer.release()
-        
+
+        attach_audio_to_video(
+            temp_output_path,
+            video_path,
+            output_path,
+            start_time=0.0,
+            end_time=info.duration,
+        )
+
         return output_path
     
     def _apply_overlays(
@@ -379,6 +397,7 @@ class DemoVideoGenerator:
         video_path = Path(video_path)
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_output_path = self._temporary_render_path(output_path)
         info = context.info if context else get_video_info(video_path)
         
         # Calculate frame range
@@ -432,7 +451,7 @@ class DemoVideoGenerator:
         fps = self.options.output_fps or info.fps
         fourcc = cv2.VideoWriter_fourcc(*self.options.output_codec)
         writer = cv2.VideoWriter(
-            str(output_path),
+            str(temp_output_path),
             fourcc,
             fps,
             (info.width, output_height),
@@ -491,7 +510,15 @@ class DemoVideoGenerator:
         finally:
             cap.release()
             writer.release()
-        
+
+        attach_audio_to_video(
+            temp_output_path,
+            video_path,
+            output_path,
+            start_time=swing.start_time,
+            end_time=swing.end_time,
+        )
+
         return output_path
 
 

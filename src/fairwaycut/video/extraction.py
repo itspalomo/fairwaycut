@@ -31,6 +31,28 @@ def _format_ffmpeg_time(timestamp: float) -> str:
     return f"{timestamp:.6f}"
 
 
+def _has_audio_stream(video_path: Path) -> bool:
+    """Return True when the input file contains at least one audio stream."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(video_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return bool(result.stdout.strip())
+
+
 def get_video_info(video_path: str | Path) -> VideoInfo:
     """
     Get information about a video file.
@@ -244,6 +266,86 @@ def extract_video_clip(
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
         raise ValueError(f"Failed to extract clip {output_path.name}: {stderr}")
+
+    return output_path
+
+
+def attach_audio_to_video(
+    rendered_video_path: str | Path,
+    source_video_path: str | Path,
+    output_path: str | Path,
+    start_time: float = 0.0,
+    end_time: float | None = None,
+    audio_codec: str = "aac",
+) -> Path:
+    """
+    Mux audio from the source video into a rendered video.
+
+    The rendered video is expected to already contain the final video frames.
+    Audio is trimmed from the source video to the requested time range and
+    encoded into the output container.
+    """
+    rendered_video_path = Path(rendered_video_path)
+    source_video_path = Path(source_video_path)
+    output_path = Path(output_path)
+
+    if not rendered_video_path.exists():
+        raise FileNotFoundError(f"Rendered video not found: {rendered_video_path}")
+    if not source_video_path.exists():
+        raise FileNotFoundError(f"Source video not found: {source_video_path}")
+
+    normalized_start = max(0.0, start_time)
+    normalized_end = end_time if end_time is None else max(normalized_start, end_time)
+
+    if not _has_audio_stream(source_video_path):
+        if rendered_video_path != output_path:
+            rendered_video_path.replace(output_path)
+        return output_path
+
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(rendered_video_path),
+    ]
+
+    if normalized_start > 0:
+        command.extend(["-ss", _format_ffmpeg_time(normalized_start)])
+    if normalized_end is not None:
+        command.extend(["-t", _format_ffmpeg_time(normalized_end - normalized_start)])
+
+    command.extend(
+        [
+            "-i",
+            str(source_video_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a?",
+            "-c:v",
+            "copy",
+            "-c:a",
+            audio_codec,
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+    )
+
+    result = subprocess.run(command, capture_output=True, check=False)
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(
+            f"Failed to attach audio to {output_path.name}: {stderr}"
+        )
+
+    if rendered_video_path != output_path and rendered_video_path.exists():
+        rendered_video_path.unlink()
 
     return output_path
 
