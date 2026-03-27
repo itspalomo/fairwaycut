@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+import subprocess
 from typing import Iterator, Optional
 import cv2
 import numpy as np
@@ -23,6 +24,11 @@ class VideoInfo:
     def frame_duration(self) -> float:
         """Duration of a single frame in seconds."""
         return 1.0 / self.fps if self.fps > 0 else 0
+
+
+def _format_ffmpeg_time(timestamp: float) -> str:
+    """Format a timestamp for ffmpeg command arguments."""
+    return f"{timestamp:.6f}"
 
 
 def get_video_info(video_path: str | Path) -> VideoInfo:
@@ -182,6 +188,66 @@ def extract_frame_at_time(
         cap.release()
 
 
+def extract_video_clip(
+    video_path: str | Path,
+    output_path: str | Path,
+    start_time: float,
+    end_time: float,
+    video_codec: str = "libx264",
+    audio_codec: str = "aac",
+) -> Path:
+    """
+    Extract a video clip using ffmpeg.
+
+    This preserves the existing re-encode behavior while avoiding MoviePy's
+    Python-side overhead for each extracted swing.
+    """
+    video_path = Path(video_path)
+    output_path = Path(output_path)
+
+    if not video_path.exists():
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    duration = max(0.0, end_time - start_time)
+    if duration <= 0:
+        raise ValueError("Clip duration must be greater than zero")
+
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-ss",
+        _format_ffmpeg_time(start_time),
+        "-i",
+        str(video_path),
+        "-t",
+        _format_ffmpeg_time(duration),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c:v",
+        video_codec,
+        "-c:a",
+        audio_codec,
+        "-movflags",
+        "+faststart",
+        "-pix_fmt",
+        "yuv420p",
+        str(output_path),
+    ]
+    result = subprocess.run(command, capture_output=True, check=False)
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"Failed to extract clip {output_path.name}: {stderr}")
+
+    return output_path
+
+
 def resize_frame(
     frame: np.ndarray,
     target_width: Optional[int] = None,
@@ -226,4 +292,3 @@ def resize_frame(
         new_h = target_height or h
     
     return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-

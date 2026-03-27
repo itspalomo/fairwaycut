@@ -1,21 +1,55 @@
 """Audio extraction and analysis utilities for golf swing detection."""
 
-import tempfile
+import subprocess
 from pathlib import Path
 
-import numpy as np
 import librosa
-from moviepy import VideoFileClip
+import numpy as np
 
 from fairwaycut.core.models import AudioData
 
 
-def extract_audio_from_video(video_path: str | Path) -> AudioData:
+def _format_ffmpeg_time(timestamp: float) -> str:
+    """Format a timestamp for ffmpeg command arguments."""
+    return f"{timestamp:.6f}"
+
+
+def _has_audio_stream(video_path: Path) -> bool:
+    """Return True when the input file contains at least one audio stream."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(video_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return bool(result.stdout.strip())
+
+
+def extract_audio_from_video(
+    video_path: str | Path,
+    start_time: float | None = None,
+    end_time: float | None = None,
+    sample_rate: int = 44100,
+) -> AudioData:
     """
     Extract audio from a video file.
 
     Args:
         video_path: Path to the video file.
+        start_time: Optional absolute start time in seconds.
+        end_time: Optional absolute end time in seconds.
+        sample_rate: Target output sample rate.
 
     Returns:
         AudioData containing the extracted audio samples and metadata.
@@ -29,37 +63,57 @@ def extract_audio_from_video(video_path: str | Path) -> AudioData:
     if not video_path.exists():
         raise FileNotFoundError(f"Video file not found: {video_path}")
 
-    # Extract audio using moviepy
-    with VideoFileClip(str(video_path)) as video:
-        if video.audio is None:
-            raise ValueError(f"Video file has no audio track: {video_path}")
+    normalized_start = max(0.0, start_time or 0.0)
+    normalized_end = end_time if end_time is None else max(normalized_start, end_time)
 
-        # Create a temporary file for the extracted audio
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-            temp_audio_path = temp_file.name
+    if not _has_audio_stream(video_path):
+        raise ValueError(f"Video file has no audio track: {video_path}")
 
-        # Write audio to temporary file
-        video.audio.write_audiofile(
-            temp_audio_path,
-            fps=44100,
-            nbytes=2,
-            codec="pcm_s16le",
-            logger=None,
-        )
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+    ]
 
-    # Load the audio with librosa for analysis
-    samples, sample_rate = librosa.load(temp_audio_path, sr=None, mono=True)
+    if normalized_start > 0:
+        command.extend(["-ss", _format_ffmpeg_time(normalized_start)])
 
-    # Clean up temporary file
-    Path(temp_audio_path).unlink(missing_ok=True)
+    command.extend(["-i", str(video_path)])
 
-    duration = len(samples) / sample_rate
+    if normalized_end is not None:
+        command.extend(["-t", _format_ffmpeg_time(normalized_end - normalized_start)])
+
+    command.extend(
+        [
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "pipe:1",
+        ]
+    )
+
+    result = subprocess.run(command, capture_output=True, check=False)
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"Failed to extract audio from {video_path}: {stderr}")
+
+    samples = np.frombuffer(result.stdout, dtype=np.float32).copy()
+    duration = len(samples) / sample_rate if sample_rate > 0 else 0.0
 
     return AudioData(
         samples=samples,
         sample_rate=sample_rate,
         duration=duration,
         source_file=str(video_path),
+        start_time=normalized_start,
     )
 
 
@@ -90,6 +144,7 @@ def load_audio_file(audio_path: str | Path, target_sr: int | None = None) -> Aud
         sample_rate=sample_rate,
         duration=duration,
         source_file=str(audio_path),
+        start_time=0.0,
     )
 
 
@@ -122,7 +177,7 @@ def compute_envelope(
         np.arange(len(envelope)),
         sr=audio.sample_rate,
         hop_length=hop_length,
-    )
+    ) + audio.start_time
 
     return envelope, times
 
@@ -164,7 +219,10 @@ def get_waveform_times(audio: AudioData) -> np.ndarray:
     Returns:
         Array of timestamps in seconds for each sample.
     """
-    return np.linspace(0, audio.duration, len(audio.samples))
+    if audio.sample_rate <= 0 or len(audio.samples) == 0:
+        return np.array([], dtype=float)
+
+    return np.arange(len(audio.samples), dtype=float) / audio.sample_rate + audio.start_time
 
 
 def compute_spectral_flux(
@@ -192,7 +250,7 @@ def compute_spectral_flux(
         np.arange(len(spectral_flux)),
         sr=audio.sample_rate,
         hop_length=hop_length,
-    )
+    ) + audio.start_time
     
     return spectral_flux, times
 
@@ -224,7 +282,6 @@ def compute_onset_strength(
         np.arange(len(onset_env)),
         sr=audio.sample_rate,
         hop_length=hop_length,
-    )
+    ) + audio.start_time
     
     return onset_env, times
-

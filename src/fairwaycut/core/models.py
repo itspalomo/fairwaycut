@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -29,24 +28,38 @@ class AudioData:
     sample_rate: int
     duration: float
     source_file: str
+    start_time: float = 0.0
 
     @property
     def num_samples(self) -> int:
         """Return the number of audio samples."""
         return len(self.samples)
+
+    @property
+    def end_time(self) -> float:
+        """Return the absolute end time of this audio segment."""
+        return self.start_time + self.duration
     
     def get_segment(self, start_sec: float, end_sec: float) -> "AudioData":
-        """Extract a segment of audio between start and end times."""
-        start_idx = int(start_sec * self.sample_rate)
-        end_idx = int(end_sec * self.sample_rate)
+        """Extract a segment of audio using absolute source timestamps."""
+        segment_start = max(self.start_time, start_sec)
+        segment_end = min(self.end_time, end_sec)
+        if segment_end < segment_start:
+            segment_end = segment_start
+
+        start_idx = int((segment_start - self.start_time) * self.sample_rate)
+        end_idx = int((segment_end - self.start_time) * self.sample_rate)
         start_idx = max(0, start_idx)
         end_idx = min(len(self.samples), end_idx)
+
+        segment_samples = self.samples[start_idx:end_idx]
         
         return AudioData(
-            samples=self.samples[start_idx:end_idx],
+            samples=segment_samples,
             sample_rate=self.sample_rate,
-            duration=end_sec - start_sec,
+            duration=len(segment_samples) / self.sample_rate if self.sample_rate > 0 else 0.0,
             source_file=self.source_file,
+            start_time=segment_start,
         )
 
 
@@ -239,4 +252,3 @@ class FusionResult:
             "pose_detection_rate": self.pose_result.detection_rate if self.pose_result else None,
             "parameters": self.parameters,
         }
-

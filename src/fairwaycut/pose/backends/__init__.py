@@ -123,7 +123,7 @@ def create_backend(
                 if not is_available():
                     raise ValueError(
                         "Apple Vision backend is not available on this system. "
-                        "Requires macOS 11+ and pyobjc-framework-Vision."
+                        "Requires macOS 11+ plus the PyObjC Vision and Quartz frameworks."
                     )
                 filtered_kwargs = _filter_kwargs_for_backend("apple_vision", kwargs)
                 return AppleVisionBackend(**filtered_kwargs)
@@ -189,7 +189,7 @@ def create_backend(
             "No pose estimation backend is available. "
             "Install one of:\n"
             "  - MediaPipe: pip install mediapipe\n"
-            "  - Apple Vision (macOS only): pip install pyobjc-framework-Vision"
+            "  - Apple Vision (macOS only): pip install pyobjc-framework-Vision pyobjc-framework-Quartz"
         )
     
     raise ImportError(
@@ -205,4 +205,3 @@ __all__ = [
     "STANDARD_LANDMARK_INDICES",
     "GOLF_REQUIRED_LANDMARKS",
 ]
-

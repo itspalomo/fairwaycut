@@ -2,8 +2,8 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+import platform
 from typing import Optional, Callable
-import numpy as np
 
 from fairwaycut.core.models import (
     AudioData,
@@ -16,6 +16,7 @@ from fairwaycut.core.models import (
 from fairwaycut.core.config import Config, FusionConfig, ProcessingMode
 from fairwaycut.audio.extraction import extract_audio_from_video
 from fairwaycut.audio.detection import detect_impacts_adaptive_snr
+from fairwaycut.pose.backends import get_available_backends
 from fairwaycut.pose.estimator import PoseEstimator
 from fairwaycut.pose.swing_phases import SwingPhaseDetector, SwingPhasesResult
 
@@ -27,6 +28,15 @@ MODE_DESCRIPTIONS = {
     ProcessingMode.LITE: "Full video with lite pose model - slower, catches missed audio",
     ProcessingMode.FULL: "Full video with full pose model - slowest, best accuracy",
 }
+
+
+@dataclass(frozen=True)
+class MergedPoseWindow:
+    """A merged pose-processing window plus the events it covers."""
+
+    start_time: float
+    end_time: float
+    event_indices: tuple[int, ...]
 
 
 class SwingDetector:
@@ -347,6 +357,7 @@ def detect_swings(
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
     start_time: float = 0.0,
     end_time: Optional[float] = None,
+    audio: Optional[AudioData] = None,
 ) -> FusionResult:
     """
     Detect swings in a video using multi-modal analysis.
@@ -366,6 +377,7 @@ def detect_swings(
         progress_callback: Optional callback(stage, current, total).
         start_time: Start time in seconds (default: 0).
         end_time: End time in seconds (default: None = video end).
+        audio: Optional pre-decoded audio segment to reuse.
     
     Returns:
         FusionResult with detected swings.
@@ -374,17 +386,26 @@ def detect_swings(
     config = config or Config.default()
     
     # Stage 1: Audio extraction and analysis (always done)
-    if progress_callback:
-        progress_callback("audio_extraction", 0, 1)
-    
-    audio = extract_audio_from_video(video_path)
-    if progress_callback:
-        progress_callback("audio_extraction", 1, 1)
-    
-    # Apply time range
-    actual_end = end_time if end_time and end_time < audio.duration else audio.duration
-    if start_time > 0 or end_time is not None:
-        audio = audio.get_segment(start_time, actual_end)
+    if audio is None:
+        if progress_callback:
+            progress_callback("audio_extraction", 0, 1)
+
+        audio = extract_audio_from_video(
+            video_path,
+            start_time=start_time if start_time > 0 else None,
+            end_time=end_time,
+        )
+
+        if progress_callback:
+            progress_callback("audio_extraction", 1, 1)
+    else:
+        requested_end = end_time if end_time is not None else audio.end_time
+        actual_requested_end = min(requested_end, audio.end_time)
+        if start_time > audio.start_time or actual_requested_end < audio.end_time:
+            audio = audio.get_segment(start_time, actual_requested_end)
+
+    actual_end = audio.end_time
+    actual_start = audio.start_time
     
     if progress_callback:
         progress_callback("audio_detection", 0, 1)
@@ -402,26 +423,22 @@ def detect_swings(
     if progress_callback:
         progress_callback("audio_detection", 1, 1)
     
-    # Adjust event timestamps back to absolute video time
-    if start_time > 0:
-        for event in audio_result.events:
-            event.timestamp += start_time
-    
     # Filter events to time range
     audio_result.events = [
         e for e in audio_result.events 
-        if start_time <= e.timestamp <= actual_end
+        if actual_start <= e.timestamp <= actual_end
     ]
     
     # Add source file to parameters
     audio_result.parameters["source_file"] = str(video_path)
     audio_result.parameters["mode"] = mode.value
-    audio_result.parameters["start_time"] = start_time
+    audio_result.parameters["start_time"] = actual_start
     audio_result.parameters["end_time"] = actual_end
     
     # Stage 2: Pose estimation (based on mode)
     pose_result: Optional[PoseAnalysisResult] = None
     segment_poses: dict[int, PoseAnalysisResult] = {}
+    pose_routing: dict[str, object] = {}
     
     if mode == ProcessingMode.AUDIO:
         # No pose estimation - just use audio results
@@ -430,17 +447,25 @@ def detect_swings(
     elif mode == ProcessingMode.HYBRID:
         # Pose estimation only around detected audio impacts
         if audio_result.events:
-            segment_poses = _process_pose_segments(
-                video_path, audio_result, audio, config, progress_callback,
-                start_time=start_time, end_time=actual_end,
+            segment_poses, pose_routing = _process_pose_segments(
+                video_path,
+                audio_result,
+                config,
+                progress_callback,
+                start_time=actual_start,
+                end_time=actual_end,
             )
     
     elif mode in (ProcessingMode.LITE, ProcessingMode.FULL):
         # Full video pose estimation
         model_complexity = 0 if mode == ProcessingMode.LITE else 1
-        pose_result = _process_full_video_pose(
-            video_path, model_complexity, config, progress_callback,
-            start_time=start_time, end_time=actual_end,
+        pose_result, pose_routing = _process_full_video_pose(
+            video_path,
+            model_complexity,
+            config,
+            progress_callback,
+            start_time=actual_start,
+            end_time=actual_end,
         )
     
     # Stage 3: Fusion
@@ -484,19 +509,27 @@ def detect_swings(
     
     if progress_callback:
         progress_callback("complete", 1, 1)
-    
+
+    result.parameters.update(
+        {
+            "mode": mode.value,
+            "analysis_start_time": actual_start,
+            "analysis_end_time": actual_end,
+            **pose_routing,
+        }
+    )
+
     return result
 
 
 def _process_pose_segments(
     video_path: Path,
     audio_result: DetectionResult,
-    audio: "AudioData",
     config: Config,
     progress_callback: Optional[Callable[[str, int, int], None]],
     start_time: float = 0.0,
     end_time: Optional[float] = None,
-) -> dict[int, PoseAnalysisResult]:
+) -> tuple[dict[int, PoseAnalysisResult], dict[str, object]]:
     """Process pose estimation only around detected audio impacts."""
     segment_poses: dict[int, PoseAnalysisResult] = {}
     
@@ -514,32 +547,47 @@ def _process_pose_segments(
         min_tracking_confidence=config.pose.min_tracking_confidence,
         max_frame_size=480,  # Smaller for speed
     )
-    
-    video_end = end_time if end_time else audio.duration + start_time
+    routing = _build_pose_routing_metadata(estimator)
+    video_end = end_time if end_time is not None else max(
+        (event.timestamp for event in events),
+        default=start_time,
+    )
     
     try:
-        for i, event in enumerate(events):
-            if progress_callback:
-                progress_callback("pose_estimation", i, len(events))
-            
-            seg_start = max(0, event.timestamp - config.fusion.pre_impact_sec)
-            seg_end = min(video_end, event.timestamp + config.fusion.post_impact_sec)
-            
-            segment_pose = estimator.process_video_segment(
-                video_path,
-                seg_start,
-                seg_end,
-                process_every_n=max(1, config.pose.process_every_n_frames),
-            )
-            segment_poses[i] = segment_pose
-        
+        windows = _build_merged_pose_windows(
+            events=events,
+            pre_impact_sec=config.fusion.pre_impact_sec,
+            post_impact_sec=config.fusion.post_impact_sec,
+            video_start=start_time,
+            video_end=video_end,
+        )
+        merged_results = estimator.process_video_segments(
+            video_path,
+            [(window.start_time, window.end_time) for window in windows],
+            progress_callback=_create_pose_progress_callback(progress_callback),
+            process_every_n=max(1, config.pose.process_every_n_frames),
+        )
+
+        for window, merged_result in zip(windows, merged_results):
+            for event_index in window.event_indices:
+                event = events[event_index]
+                seg_start = max(0.0, event.timestamp - config.fusion.pre_impact_sec)
+                seg_end = min(video_end, event.timestamp + config.fusion.post_impact_sec)
+                segment_poses[event_index] = _slice_pose_result(
+                    merged_result,
+                    seg_start,
+                    seg_end,
+                )
+
         if progress_callback:
             progress_callback("pose_estimation", len(events), len(events))
-            
+
+        routing["segments_processed"] = len(segment_poses)
+        routing["merged_pose_windows"] = len(windows)
     finally:
         estimator.close()
-    
-    return segment_poses
+
+    return segment_poses, routing
 
 
 def _process_full_video_pose(
@@ -549,42 +597,126 @@ def _process_full_video_pose(
     progress_callback: Optional[Callable[[str, int, int], None]],
     start_time: float = 0.0,
     end_time: Optional[float] = None,
-) -> PoseAnalysisResult:
+) -> tuple[PoseAnalysisResult, dict[str, object]]:
     """Process pose estimation on full video or time range."""
     if progress_callback:
         progress_callback("pose_estimation", 0, 1)
-    
-    def pose_progress(current: int, total: int):
-        if progress_callback:
-            progress_callback("pose_estimation", current, total)
-    
+
     estimator = PoseEstimator(
         model_complexity=model_complexity,
         min_detection_confidence=config.pose.min_detection_confidence,
         min_tracking_confidence=config.pose.min_tracking_confidence,
         max_frame_size=config.pose.max_frame_size,
     )
-    
+    routing = _build_pose_routing_metadata(estimator)
+
     try:
         if start_time > 0 or end_time is not None:
-            # Process specific time range
             pose_result = estimator.process_video_segment(
                 video_path,
                 start_time=start_time,
-                end_time=end_time if end_time else float('inf'),
-                progress_callback=pose_progress,
+                end_time=end_time if end_time is not None else float("inf"),
+                progress_callback=_create_pose_progress_callback(progress_callback),
                 process_every_n=config.pose.process_every_n_frames,
             )
         else:
             pose_result = estimator.process_video(
                 video_path,
-                progress_callback=pose_progress,
+                progress_callback=_create_pose_progress_callback(progress_callback),
                 process_every_n=config.pose.process_every_n_frames,
             )
     finally:
         estimator.close()
-    
-    return pose_result
+
+    return pose_result, routing
+
+
+def _create_pose_progress_callback(
+    progress_callback: Optional[Callable[[str, int, int], None]],
+) -> Optional[Callable[[int, int], None]]:
+    """Adapt pose-backend progress updates to the CLI stage callback."""
+    if progress_callback is None:
+        return None
+
+    def pose_progress(current: int, total: int):
+        progress_callback("pose_estimation", current, total)
+
+    return pose_progress
+
+
+def _build_pose_routing_metadata(estimator: PoseEstimator) -> dict[str, object]:
+    """Describe the automatically selected pose backend for reporting."""
+    metadata: dict[str, object] = {
+        "pose_backend": estimator.backend_name,
+        "pose_backend_accelerated": estimator.supports_gpu,
+    }
+
+    if (
+        platform.system() == "Darwin"
+        and platform.machine() == "arm64"
+        and estimator.backend_name == "mediapipe"
+        and "apple_vision" not in get_available_backends()
+    ):
+        metadata["pose_backend_recommendation"] = (
+            "Apple Vision support is missing from the current environment. "
+            "Run `uv sync` to refresh macOS dependencies and enable hardware-accelerated pose estimation."
+        )
+
+    return metadata
+
+
+def _build_merged_pose_windows(
+    events: list[ImpactEvent],
+    pre_impact_sec: float,
+    post_impact_sec: float,
+    video_start: float,
+    video_end: float,
+) -> list[MergedPoseWindow]:
+    """Merge overlapping pose windows so nearby impacts share one decode pass."""
+    windows: list[MergedPoseWindow] = []
+
+    for event_index, event in enumerate(events):
+        window_start = max(video_start, event.timestamp - pre_impact_sec)
+        window_end = min(video_end, event.timestamp + post_impact_sec)
+
+        if not windows or window_start > windows[-1].end_time:
+            windows.append(
+                MergedPoseWindow(
+                    start_time=window_start,
+                    end_time=window_end,
+                    event_indices=(event_index,),
+                )
+            )
+            continue
+
+        previous = windows[-1]
+        windows[-1] = MergedPoseWindow(
+            start_time=previous.start_time,
+            end_time=max(previous.end_time, window_end),
+            event_indices=previous.event_indices + (event_index,),
+        )
+
+    return windows
+
+
+def _slice_pose_result(
+    pose_result: PoseAnalysisResult,
+    start_time: float,
+    end_time: float,
+) -> PoseAnalysisResult:
+    """Slice a merged pose result back into the per-event time window."""
+    frames = [
+        frame
+        for frame in pose_result.frames
+        if start_time <= frame.timestamp <= end_time
+    ]
+    return PoseAnalysisResult(
+        frames=frames,
+        fps=pose_result.fps,
+        total_frames=len(frames),
+        video_duration=max(0.0, end_time - start_time),
+        source_file=pose_result.source_file,
+    )
 
 
 def detect_swings_audio_only(
@@ -681,4 +813,3 @@ def detect_swings_full_pose(
         start_time=start_time,
         end_time=end_time,
     )
-

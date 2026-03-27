@@ -109,6 +109,43 @@ class PoseBackend(ABC):
             PoseAnalysisResult for the segment.
         """
         pass
+
+    def process_video_segments(
+        self,
+        video_path: str | Path,
+        segments: list[tuple[float, float]],
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        process_every_n: int = 1,
+    ) -> list[PoseAnalysisResult]:
+        """
+        Process multiple video segments.
+
+        Backends can override this to reuse a single open capture/session.
+        The default implementation falls back to processing each segment
+        independently.
+        """
+        results: list[PoseAnalysisResult] = []
+        total_segments = len(segments)
+
+        for index, (start_time, end_time) in enumerate(segments):
+            segment_progress = None
+            if progress_callback is not None:
+                segment_progress = lambda current, total, idx=index: progress_callback(  # noqa: E731
+                    idx * max(total, 1) + current,
+                    max(total_segments, 1) * max(total, 1),
+                )
+
+            results.append(
+                self.process_video_segment(
+                    video_path,
+                    start_time,
+                    end_time,
+                    progress_callback=segment_progress,
+                    process_every_n=process_every_n,
+                )
+            )
+
+        return results
     
     @abstractmethod
     def close(self) -> None:
@@ -170,4 +207,3 @@ GOLF_REQUIRED_LANDMARKS = [
     "left_hip",
     "right_hip",
 ]
-

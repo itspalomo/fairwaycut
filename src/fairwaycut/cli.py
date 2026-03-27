@@ -1,15 +1,15 @@
 """Command-line interface for FairwayCut."""
 
 import json
+import platform
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
 
-
-
 from fairwaycut import __version__
 from fairwaycut.core.config import Config
-from fairwaycut.core.models import SwingPhase
+from fairwaycut.ui import console, print_banner, print_swing_summary, RichProgressHandler
 import rich_click as click
 
 # Rich Click Configuration
@@ -37,15 +37,27 @@ click.rich_click.OPTION_GROUPS = {
     ],
 }
 
-
-from fairwaycut.ui import console, print_banner, print_swing_summary, RichProgressHandler
-
-
 @click.group()
 @click.version_option(version=__version__)
 def main():
     """FairwayCut - Golf swing detection and video generation."""
     pass
+
+
+def _print_pose_backend_summary(parameters: dict) -> None:
+    """Print the selected pose backend when pose estimation was used."""
+    backend = parameters.get("pose_backend")
+    if not backend:
+        return
+
+    accelerated = parameters.get("pose_backend_accelerated", False)
+    backend_label = "Apple Vision" if backend == "apple_vision" else "MediaPipe"
+    suffix = "hardware-accelerated" if accelerated else "CPU fallback"
+    console.print(f"🦴 Pose backend: [cyan]{backend_label}[/cyan] ({suffix})")
+
+    recommendation = parameters.get("pose_backend_recommendation")
+    if recommendation:
+        console.print(recommendation, style="yellow")
 
 
 @main.command()
@@ -174,6 +186,7 @@ def analyze(
         
         console.print()
         console.print(f"🎯 Found [bold green]{len(result.swings)}[/bold green] swings")
+        _print_pose_backend_summary(result.parameters)
         
         # Print swing summary
         if result.swings:
@@ -219,7 +232,7 @@ def analyze(
         if plot_3d and result.pose_result and result.swings:
             console.print("📊 Generating 3D analysis plot...")
             from fairwaycut.pose.normalizer import PoseNormalizer
-            from fairwaycut.visualization.plot3d import plot_swing_3d, save_swing_3d_plot
+            from fairwaycut.visualization.plot3d import save_swing_3d_plot
             
             normalizer = PoseNormalizer()
             
@@ -276,8 +289,8 @@ def analyze(
                             title=f"Swing #{swing.swing_id}",
                         )
             
-            console.print(f"  ✓ Saved interactive viewers")
-            console.print(f"    Open in browser to rotate/zoom/pan")
+            console.print("  ✓ Saved interactive viewers")
+            console.print("    Open in browser to rotate/zoom/pan")
         
     except Exception as e:
         console.print(f"❌ Error: {e}", style="bold red")
@@ -373,7 +386,7 @@ def extract(
     from fairwaycut.audio.extraction import extract_audio_from_video
     from fairwaycut.fusion.detector import detect_swings
     from fairwaycut.core.config import Config
-    from moviepy import VideoFileClip
+    from fairwaycut.video.extraction import extract_video_clip
     
     config = Config.default()
     config.fusion.pre_impact_sec = pre_impact
@@ -385,10 +398,20 @@ def extract(
     try:
         # Step 1: Detect swings
         mode_desc = {"audio": "audio", "hybrid": "hybrid", "lite": "lite", "full": "full"}
+        shared_audio = None
         
         with handler.live() as h:
              h.console.print(f"🔍 Detecting swings (mode: {mode_desc[mode]})...")
-             
+
+             if with_overlays:
+                h.callback("audio_extraction", 0, 1)
+                shared_audio = extract_audio_from_video(
+                    video_path,
+                    start_time=start if start > 0 else None,
+                    end_time=end,
+                )
+                h.callback("audio_extraction", 1, 1)
+
              result = detect_swings(
                 video_path,
                 mode=processing_mode,
@@ -396,9 +419,11 @@ def extract(
                 start_time=start,
                 end_time=end,
                 progress_callback=h.callback,
+                audio=shared_audio,
             )
         
         console.print(f"🎯 Found [bold green]{len(result.swings)}[/bold green] swings")
+        _print_pose_backend_summary(result.parameters)
         
         if not result.swings:
             console.print("No swings detected. Try adjusting parameters.", style="yellow")
@@ -410,10 +435,6 @@ def extract(
         if with_overlays:
             # Use overlay generator for clips
             from fairwaycut.video.generator import generate_all_swing_clips, DemoVideoOptions
-            
-            audio = extract_audio_from_video(video_path)
-            
-
             
             options = DemoVideoOptions(
                 show_skeleton=True,
@@ -452,7 +473,11 @@ def extract(
                     video_path,
                     output_path,
                     result,
-                    audio,
+                    shared_audio if shared_audio is not None else extract_audio_from_video(
+                        video_path,
+                        start_time=start if start > 0 else None,
+                        end_time=end,
+                    ),
                     options=options,
                     progress_callback=generation_progress,
                 )
@@ -460,25 +485,19 @@ def extract(
             console.print(f"\n✅ Extracted [bold green]{len(clips)}[/bold green] clips with overlays")
         else:
             # Simple extraction without overlays
-            with VideoFileClip(str(video_path)) as video:
-                # Use track for simple progress
-                from rich.progress import track
+            from rich.progress import track
+            
+            for swing in track(result.swings, description="Saving clips..."):
+                clip_path = output_path / f"swing_{swing.swing_id:03d}.mp4"
+                extract_video_clip(
+                    video_path,
+                    clip_path,
+                    start_time=swing.start_time,
+                    end_time=swing.end_time,
+                )
                 
-                for swing in track(result.swings, description="Saving clips..."):
-                    clip_path = output_path / f"swing_{swing.swing_id:03d}.mp4"
-                    
-                    # Extract subclip
-                    subclip = video.subclipped(swing.start_time, swing.end_time)
-                    # Suppress moviepy output unless verbose, but we are inside a progress bar so suppress it anyway or it breaks UI
-                    subclip.write_videofile(
-                        str(clip_path),
-                        codec="libx264",
-                        audio_codec="aac",
-                        logger=None, # Suppress moviepy bar
-                    )
-                    
-                    if verbose:
-                        console.print(f"  ✓ Swing #{swing.swing_id}: {clip_path.name}")
+                if verbose:
+                    console.print(f"  ✓ Swing #{swing.swing_id}: {clip_path.name}")
             
             console.print(f"\n✅ Extracted [bold green]{len(result.swings)}[/bold green] clips")
         
@@ -611,7 +630,6 @@ def info():
     deps = [
         ("numpy", "numpy"),
         ("librosa", "librosa"),
-        ("moviepy", "moviepy"),
         ("opencv-python", "cv2"),
         ("mediapipe", "mediapipe"),
         ("matplotlib", "matplotlib"),
@@ -626,6 +644,35 @@ def info():
             console.print(f"  ✓ {name}: {version}", style="green")
         except ImportError:
             console.print(f"  ✗ {name}: not installed", style="red")
+
+    console.print("\n[bold]External Tools:[/bold]")
+    console.print(
+        f"  {'✓' if shutil.which('ffmpeg') else '✗'} ffmpeg",
+        style="green" if shutil.which("ffmpeg") else "red",
+    )
+    console.print(
+        f"  {'✓' if shutil.which('ffprobe') else '✗'} ffprobe",
+        style="green" if shutil.which("ffprobe") else "red",
+    )
+
+    console.print("\n[bold]Pose Routing:[/bold]")
+    from fairwaycut.pose.backends import get_available_backends
+
+    available_backends = get_available_backends()
+    if available_backends:
+        console.print(f"  Auto-select order: {', '.join(available_backends)}")
+    else:
+        console.print("  No pose backends available", style="red")
+
+    if (
+        platform.system() == "Darwin"
+        and platform.machine() == "arm64"
+        and "apple_vision" not in available_backends
+    ):
+        console.print(
+            "  Apple Vision support is missing from the current environment. Run `uv sync` to refresh macOS dependencies.",
+            style="yellow",
+        )
 
 
 if __name__ == "__main__":

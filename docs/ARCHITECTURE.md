@@ -27,7 +27,7 @@ graph TD
 
 ### 1. Audio Analysis (`fairwaycut.audio`)
 Responsible for detecting the "crack" of the club hitting the ball.
-- **Extraction**: Uses `ffmpeg` (via `moviepy`) to extract raw audio.
+- **Extraction**: Uses `ffmpeg` directly to decode raw audio.
 - **Transient analysis**: Spectral flux + onset strength identify sharp, broadband changes that match impact transients, while RMS is used to reject sustained hums.
 - **Adaptive SNR**: Each candidate peak is compared to a rolling median background window, so thresholds rise automatically in noisy bays and drop in quiet bays.
 - **Key Function**: `detect_impacts_adaptive_snr`
@@ -62,7 +62,7 @@ Defines the shared data structures and validation rules.
     - **Full Mode**: Every frame is processed (slower, but doesn't rely on audio).
 4.  **Fusion**: Candidates are validated and merged into unique swing events.
 5.  **Output**:
-    - **Extract**: `moviepy` cuts the original video at event boundaries.
+    - **Extract**: `ffmpeg` cuts the original video at event boundaries.
     - **Report**: JSON dump of `DetectionResult`.
 
 ## Detection Approaches
@@ -87,7 +87,7 @@ Defines the shared data structures and validation rules.
 ## Video & Visualization Pipeline
 
 - **Segmentation**: Each fused `SwingEvent` defines `start_time`/`end_time` using configurable pre/post impact buffers.
-- **Extraction**: `moviepy` writes individual swing MP4s; a manifest and JSON report are saved alongside clips.
+- **Extraction**: `ffmpeg` writes individual swing MP4s; a manifest and JSON report are saved alongside clips.
 - **Overlays**: The overlay pipeline renders pose skeletons, waveforms, timestamps, impact markers, and optional phase labels. Visualization presets control glow, trails, and depth coloring.
 - **Modes**:
     - `audio`: audio-only overlays (fastest).

@@ -9,16 +9,13 @@ import numpy as np
 
 from fairwaycut.core.models import (
     FramePose,
-    Landmark,
     AudioData,
     SwingPhase,
-    DetectionResult,
     ImpactEvent,
 )
 from fairwaycut.pose.landmarks import (
     GOLF_SKELETON_CONNECTIONS,
     POSE_CONNECTIONS,
-    POSE_LANDMARKS,
 )
 from fairwaycut.video.effects import (
     create_transparent_layer,
@@ -32,7 +29,6 @@ from fairwaycut.video.effects import (
     create_particle_burst,
     depth_to_color,
     velocity_to_intensity,
-    interpolate_color,
     alpha_composite,
 )
 
@@ -703,8 +699,127 @@ def draw_pose_skeleton(
         
         pt = lm.to_pixel(w, h)
         cv2.circle(frame, pt, landmark_radius, landmark_color, -1, cv2.LINE_AA)
-    
+
     return frame
+
+
+def _compute_waveform_envelope(samples: np.ndarray, num_bins: int) -> np.ndarray:
+    """Compute max-amplitude bins for a waveform strip."""
+    envelope = np.zeros(num_bins, dtype=np.float32)
+    if num_bins <= 0 or len(samples) == 0:
+        return envelope
+
+    abs_samples = np.abs(samples)
+    if len(abs_samples) < num_bins:
+        envelope[:len(abs_samples)] = abs_samples
+        return envelope
+
+    bin_size = max(1, len(abs_samples) // num_bins)
+    usable = min(len(abs_samples), bin_size * num_bins)
+    if usable <= 0:
+        return envelope
+
+    trimmed = abs_samples[:usable]
+    reshaped = trimmed.reshape(-1, bin_size)
+    envelope[:reshaped.shape[0]] = reshaped.max(axis=1)
+    return envelope
+
+
+def build_waveform_strip(
+    audio: AudioData,
+    current_time: float,
+    frame_width: int,
+    window_sec: float = 5.0,
+    height: int = 80,
+    color: tuple[int, int, int] = DEFAULT_WAVEFORM_COLOR,
+    bg_color: tuple[int, int, int] = DEFAULT_WAVEFORM_BG,
+    impact_events: Optional[list[ImpactEvent]] = None,
+    impact_color: tuple[int, int, int] = DEFAULT_IMPACT_COLOR,
+) -> np.ndarray:
+    """Render a waveform strip for a specific playback time."""
+    waveform_bg = np.full((height, frame_width, 3), bg_color, dtype=np.uint8)
+    if frame_width <= 0 or height <= 0:
+        return waveform_bg
+
+    half_window = window_sec / 2
+    start_time = max(audio.start_time, current_time - half_window)
+    end_time = min(audio.end_time, current_time + half_window)
+
+    start_sample = int((start_time - audio.start_time) * audio.sample_rate)
+    end_sample = int((end_time - audio.start_time) * audio.sample_rate)
+    start_sample = max(0, start_sample)
+    end_sample = min(len(audio.samples), end_sample)
+    samples = audio.samples[start_sample:end_sample]
+
+    if len(samples) == 0:
+        return waveform_bg
+
+    envelope = _compute_waveform_envelope(samples, frame_width)
+    max_amp = np.max(envelope) if np.max(envelope) > 0 else 1.0
+    normalized = envelope / max_amp
+
+    max_height = max(1, height // 2 - 2)
+    amplitudes = (normalized * max_height).astype(np.int32)
+    center_y = height // 2
+    rows = np.arange(height, dtype=np.int32)[:, None]
+    mask = np.abs(rows - center_y) <= amplitudes[None, :]
+    waveform_bg[mask] = color
+
+    window_duration = end_time - start_time
+    time_position = (
+        (current_time - start_time) / window_duration
+        if window_duration > 0
+        else 0.5
+    )
+    indicator_x = int(np.clip(time_position * frame_width, 0, frame_width - 1))
+    waveform_bg[:, max(0, indicator_x - 1):min(frame_width, indicator_x + 1)] = (255, 255, 255)
+
+    if impact_events and window_duration > 0:
+        for event in impact_events:
+            if start_time <= event.timestamp <= end_time:
+                event_position = (event.timestamp - start_time) / window_duration
+                event_x = int(np.clip(event_position * frame_width, 0, frame_width - 1))
+
+                pts = np.array(
+                    [
+                        [event_x, 5],
+                        [max(0, event_x - 5), 0],
+                        [min(frame_width - 1, event_x + 5), 0],
+                    ],
+                    np.int32,
+                )
+                cv2.fillPoly(waveform_bg, [pts], impact_color)
+                waveform_bg[5:height - 5, event_x:event_x + 1] = impact_color
+
+    return waveform_bg
+
+
+def build_waveform_strip_sequence(
+    audio: AudioData,
+    timestamps: list[float],
+    frame_width: int,
+    window_sec: float = 5.0,
+    height: int = 80,
+    color: tuple[int, int, int] = DEFAULT_WAVEFORM_COLOR,
+    bg_color: tuple[int, int, int] = DEFAULT_WAVEFORM_BG,
+    impact_events: Optional[list[ImpactEvent]] = None,
+    impact_color: tuple[int, int, int] = DEFAULT_IMPACT_COLOR,
+) -> list[np.ndarray]:
+    """Pre-render waveform strips for a sequence of frame timestamps."""
+    return [
+        build_waveform_strip(
+            audio,
+            current_time=timestamp,
+            frame_width=frame_width,
+            window_sec=window_sec,
+            height=height,
+            color=color,
+            bg_color=bg_color,
+            impact_events=impact_events,
+            impact_color=impact_color,
+        )
+        for timestamp in timestamps
+    ]
 
 
 def draw_audio_waveform(
@@ -745,75 +860,17 @@ def draw_audio_waveform(
     else:
         y_start = frame_h - height
     
-    # Create waveform background
-    waveform_bg = np.full((height, frame_w, 3), bg_color, dtype=np.uint8)
-    
-    # Calculate time window
-    half_window = window_sec / 2
-    start_time = max(0, current_time - half_window)
-    end_time = min(audio.duration, current_time + half_window)
-    
-    # Get audio samples for window
-    start_sample = int(start_time * audio.sample_rate)
-    end_sample = int(end_time * audio.sample_rate)
-    samples = audio.samples[start_sample:end_sample]
-    
-    if len(samples) == 0:
-        # Paste empty background and return
-        frame[y_start:y_start + height, :] = waveform_bg
-        return frame
-    
-    # Downsample to match frame width
-    num_bins = frame_w
-    bin_size = max(1, len(samples) // num_bins)
-    
-    # Calculate envelope (max amplitude per bin)
-    envelope = np.zeros(num_bins)
-    for i in range(min(num_bins, len(samples) // bin_size)):
-        bin_start = i * bin_size
-        bin_end = min(bin_start + bin_size, len(samples))
-        if bin_start < bin_end:
-            envelope[i] = np.max(np.abs(samples[bin_start:bin_end]))
-    
-    # Normalize envelope
-    max_amp = np.max(envelope) if np.max(envelope) > 0 else 1
-    envelope = envelope / max_amp
-    
-    # Draw waveform
-    center_y = height // 2
-    for x in range(num_bins):
-        amp = int(envelope[x] * (height // 2 - 2))
-        if amp > 0:
-            cv2.line(
-                waveform_bg,
-                (x, center_y - amp),
-                (x, center_y + amp),
-                color,
-                1,
-            )
-    
-    # Draw current time indicator (vertical line)
-    time_position = (current_time - start_time) / (end_time - start_time) if end_time > start_time else 0.5
-    indicator_x = int(time_position * frame_w)
-    cv2.line(waveform_bg, (indicator_x, 0), (indicator_x, height), (255, 255, 255), 2)
-    
-    # Draw impact markers
-    if impact_events:
-        for event in impact_events:
-            if start_time <= event.timestamp <= end_time:
-                event_position = (event.timestamp - start_time) / (end_time - start_time)
-                event_x = int(event_position * frame_w)
-                
-                # Draw triangle marker
-                pts = np.array([
-                    [event_x, 5],
-                    [event_x - 5, 0],
-                    [event_x + 5, 0],
-                ], np.int32)
-                cv2.fillPoly(waveform_bg, [pts], impact_color)
-                
-                # Draw vertical line
-                cv2.line(waveform_bg, (event_x, 5), (event_x, height - 5), impact_color, 1)
+    waveform_bg = build_waveform_strip(
+        audio,
+        current_time=current_time,
+        frame_width=frame_w,
+        window_sec=window_sec,
+        height=height,
+        color=color,
+        bg_color=bg_color,
+        impact_events=impact_events,
+        impact_color=impact_color,
+    )
     
     # Paste waveform onto frame
     frame[y_start:y_start + height, :] = waveform_bg
@@ -1050,4 +1107,3 @@ def draw_confidence_bar(
     cv2.putText(frame, label_text, (x, y - 5), font, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
     
     return frame
-

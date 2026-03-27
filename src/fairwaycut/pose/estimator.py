@@ -17,9 +17,7 @@ from typing import Optional, Callable
 
 from fairwaycut.core.models import FramePose, PoseAnalysisResult
 from fairwaycut.pose.backends import (
-    PoseBackend,
     create_backend,
-    get_available_backends,
 )
 
 
@@ -167,6 +165,21 @@ class PoseEstimator:
             video_path,
             start_time,
             end_time,
+            progress_callback=progress_callback,
+            process_every_n=process_every_n,
+        )
+
+    def process_video_segments(
+        self,
+        video_path: str | Path,
+        segments: list[tuple[float, float]],
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        process_every_n: int = 1,
+    ) -> list[PoseAnalysisResult]:
+        """Process multiple video segments, reusing backend resources when possible."""
+        return self._backend.process_video_segments(
+            video_path,
+            segments,
             progress_callback=progress_callback,
             process_every_n=process_every_n,
         )
