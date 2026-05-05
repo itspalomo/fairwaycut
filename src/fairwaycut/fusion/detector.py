@@ -18,6 +18,7 @@ from fairwaycut.audio.extraction import extract_audio_from_video
 from fairwaycut.audio.detection import detect_impacts_adaptive_snr
 from fairwaycut.pose.backends import get_available_backends
 from fairwaycut.pose.estimator import PoseEstimator
+from fairwaycut.pose.landmarks import get_wrist_speed
 from fairwaycut.pose.swing_phases import SwingPhaseDetector, SwingPhasesResult
 
 
@@ -40,37 +41,21 @@ class MergedPoseWindow:
 
 
 class SwingDetector:
+    """Multi-modal swing detector.
+
+    Architecture (hybrid mode):
+      1. Audio detection produces candidate impacts with their own
+         confidence scores.
+      2. Pose estimation runs on a window around each candidate.
+      3. Pose acts as a pure validator (binary yes/no): the candidate is
+         kept iff the pose track shows a real swing-motion pattern. Pose
+         does NOT inflate the candidate's score — that prevents weak audio
+         hits from being rescued by spurious pose matches.
+      4. Surviving candidates' final score is the audio confidence.
     """
-    Multi-modal swing detector combining audio impact detection with pose estimation.
-    
-    This detector uses audio to find candidate impact times, then validates
-    and enriches those detections with pose-based swing phase analysis.
-    The fusion approach provides more accurate swing detection than either
-    modality alone.
-    """
-    
-    def __init__(
-        self,
-        config: Optional[FusionConfig] = None,
-        audio_weight: float = 0.6,
-        pose_weight: float = 0.4,
-    ):
-        """
-        Initialize the swing detector.
-        
-        Args:
-            config: FusionConfig with detection parameters.
-            audio_weight: Weight for audio-based confidence (0-1).
-            pose_weight: Weight for pose-based confidence (0-1).
-        """
+
+    def __init__(self, config: Optional[FusionConfig] = None):
         self.config = config or FusionConfig()
-        self.audio_weight = audio_weight
-        self.pose_weight = pose_weight
-        
-        # Normalize weights
-        total = self.audio_weight + self.pose_weight
-        self.audio_weight /= total
-        self.pose_weight /= total
     
     def detect(
         self,
@@ -93,28 +78,29 @@ class SwingDetector:
         """
         swings = []
         phase_detector = SwingPhaseDetector()
-        
+        pose_attempted = pose_result is not None and bool(pose_result.frames)
+        rejections: dict[str, int] = {}
+
         for i, audio_event in enumerate(audio_result.events):
             # Define segment boundaries
             start_time = max(0, audio_event.timestamp - pre_impact_sec)
             end_time = audio_event.timestamp + post_impact_sec
-            
+
             # Initialize confidence scores
             audio_confidence = audio_event.confidence
             pose_confidence = 0.0
-            
+
             # Phase information
             phases_result: Optional[SwingPhasesResult] = None
-            
+            segment_result: Optional[PoseAnalysisResult] = None
+
             # If we have pose data, validate and enrich
-            if pose_result is not None and pose_result.frames:
-                # Extract poses for this segment
+            if pose_attempted:
                 segment_poses = self._get_segment_poses(
                     pose_result, start_time, end_time
                 )
-                
+
                 if segment_poses:
-                    # Create mini pose result for phase detection
                     segment_result = PoseAnalysisResult(
                         frames=segment_poses,
                         fps=pose_result.fps,
@@ -122,56 +108,67 @@ class SwingDetector:
                         video_duration=end_time - start_time,
                         source_file=pose_result.source_file,
                     )
-                    
-                    # Detect swing phases with audio hint
+
                     phases_result = phase_detector.detect_phases(
                         segment_result,
                         expected_impact_time=audio_event.timestamp,
                     )
-                    
-                    # Calculate pose confidence
+
                     pose_confidence = self._calculate_pose_confidence(
                         phases_result, segment_result
                     )
-            
-            # Combine confidences
-            combined_confidence = (
-                self.audio_weight * audio_confidence +
-                self.pose_weight * pose_confidence
-            )
-            
-            # Create swing event
+
+            # Pose-as-validator: when pose was attempted, the candidate must
+            # show a real swing-motion pattern to survive. Pose does not
+            # contribute to the score.
+            if pose_attempted:
+                passed, reason = self._segment_passes_motion_gate(
+                    phases_result, segment_result
+                )
+                if not passed:
+                    rejections[reason] = rejections.get(reason, 0) + 1
+                    continue
+
+            # Audio confidence floor — independent of pose. Catches loud
+            # non-impact noise (claps, ball bounces) that the pose validator
+            # might still accept if there's incidental motion.
+            if audio_confidence < self.config.min_audio_confidence:
+                rejections["audio_confidence_below_floor"] = (
+                    rejections.get("audio_confidence_below_floor", 0) + 1
+                )
+                continue
+
             swing = SwingEvent(
                 swing_id=i + 1,
                 impact_time=audio_event.timestamp,
                 start_time=start_time,
                 end_time=end_time,
                 audio_confidence=audio_confidence,
-                pose_confidence=pose_confidence,
-                combined_confidence=combined_confidence,
+                pose_confidence=pose_confidence,  # Informational only.
+                combined_confidence=audio_confidence,  # Score = audio.
                 source_file=audio_result.parameters.get("source_file", ""),
             )
-            
-            # Add phase timing if available
+
             if phases_result and phases_result.transitions:
                 swing = self._add_phase_timing(swing, phases_result)
-            
+
             swings.append(swing)
-        
-        # Filter low confidence swings
-        min_confidence = self.config.min_combined_confidence
-        swings = [s for s in swings if s.combined_confidence >= min_confidence]
-        
+
+        # Renumber swing IDs sequentially so downstream filenames stay tidy.
+        for new_id, swing in enumerate(swings, start=1):
+            swing.swing_id = new_id
+
         return FusionResult(
             swings=swings,
             audio_result=audio_result,
             pose_result=pose_result,
             parameters={
-                "audio_weight": self.audio_weight,
-                "pose_weight": self.pose_weight,
                 "pre_impact_sec": pre_impact_sec,
                 "post_impact_sec": post_impact_sec,
-                "min_combined_confidence": min_confidence,
+                "swing_motion_gate": self.config.require_swing_motion,
+                "min_peak_wrist_speed": self.config.min_peak_wrist_speed,
+                "min_audio_confidence": self.config.min_audio_confidence,
+                "rejections": rejections,
             },
         )
     
@@ -187,6 +184,41 @@ class SwingDetector:
             if start_time <= f.timestamp <= end_time
         ]
     
+    def _segment_peak_wrist_speed(
+        self,
+        segment_result: PoseAnalysisResult,
+    ) -> float:
+        """Highest per-frame wrist speed seen across the segment."""
+        frames = segment_result.frames
+        peak = 0.0
+        for i in range(1, len(frames)):
+            speed = get_wrist_speed(frames, i, window=1)
+            if speed is not None and speed > peak:
+                peak = speed
+        return peak
+
+    def _segment_passes_motion_gate(
+        self,
+        phases_result: Optional[SwingPhasesResult],
+        segment_result: Optional[PoseAnalysisResult],
+    ) -> tuple[bool, str]:
+        """Decide whether a candidate's pose track looks like a real swing.
+
+        Returns (passed, reason). Reason is the rejection cause when
+        passed=False, or the empty string when accepted.
+        """
+        if not self.config.require_swing_motion:
+            return True, ""
+        if segment_result is None or not segment_result.frames:
+            return False, "no_pose_data"
+        if self.config.require_complete_swing:
+            if phases_result is None or not phases_result.has_complete_swing:
+                return False, "incomplete_swing_phases"
+        peak_speed = self._segment_peak_wrist_speed(segment_result)
+        if peak_speed < self.config.min_peak_wrist_speed:
+            return False, f"wrist_speed_below_threshold({peak_speed:.2f})"
+        return True, ""
+
     def _calculate_pose_confidence(
         self,
         phases_result: SwingPhasesResult,
@@ -260,62 +292,59 @@ class SwingDetector:
         """
         swings = []
         phase_detector = SwingPhaseDetector()
-        
+        rejections: dict[str, int] = {}
+
         for i, audio_event in enumerate(audio_result.events):
-            # Define segment boundaries
             start_time = max(0, audio_event.timestamp - pre_impact_sec)
             end_time = audio_event.timestamp + post_impact_sec
-            
-            # Initialize confidence scores
+
             audio_confidence = audio_event.confidence
             pose_confidence = 0.0
-            
-            # Phase information
             phases_result: Optional[SwingPhasesResult] = None
-            
-            # Get pose data for this segment if available
-            if i in segment_poses:
-                segment_result = segment_poses[i]
-                
-                if segment_result and segment_result.frames:
-                    # Detect swing phases with audio hint
-                    phases_result = phase_detector.detect_phases(
-                        segment_result,
-                        expected_impact_time=audio_event.timestamp,
-                    )
-                    
-                    # Calculate pose confidence
-                    pose_confidence = self._calculate_pose_confidence(
-                        phases_result, segment_result
-                    )
-            
-            # Combine confidences
-            combined_confidence = (
-                self.audio_weight * audio_confidence +
-                self.pose_weight * pose_confidence
+            segment_result: Optional[PoseAnalysisResult] = segment_poses.get(i)
+
+            if segment_result and segment_result.frames:
+                phases_result = phase_detector.detect_phases(
+                    segment_result,
+                    expected_impact_time=audio_event.timestamp,
+                )
+                pose_confidence = self._calculate_pose_confidence(
+                    phases_result, segment_result
+                )
+
+            # Pose-as-validator: hybrid always runs pose around every audio
+            # impact, so this gate fires for every candidate.
+            passed, reason = self._segment_passes_motion_gate(
+                phases_result, segment_result
             )
-            
-            # Create swing event
+            if not passed:
+                rejections[reason] = rejections.get(reason, 0) + 1
+                continue
+
+            if audio_confidence < self.config.min_audio_confidence:
+                rejections["audio_confidence_below_floor"] = (
+                    rejections.get("audio_confidence_below_floor", 0) + 1
+                )
+                continue
+
             swing = SwingEvent(
                 swing_id=i + 1,
                 impact_time=audio_event.timestamp,
                 start_time=start_time,
                 end_time=end_time,
                 audio_confidence=audio_confidence,
-                pose_confidence=pose_confidence,
-                combined_confidence=combined_confidence,
+                pose_confidence=pose_confidence,  # Informational only.
+                combined_confidence=audio_confidence,  # Score = audio.
                 source_file=audio_result.parameters.get("source_file", ""),
             )
-            
-            # Add phase timing if available
+
             if phases_result and phases_result.transitions:
                 swing = self._add_phase_timing(swing, phases_result)
-            
+
             swings.append(swing)
-        
-        # Filter low confidence swings
-        min_confidence = self.config.min_combined_confidence
-        swings = [s for s in swings if s.combined_confidence >= min_confidence]
+
+        for new_id, swing in enumerate(swings, start=1):
+            swing.swing_id = new_id
         
         # Combine all segment poses into one result for reference
         all_frames = []
@@ -339,13 +368,14 @@ class SwingDetector:
             audio_result=audio_result,
             pose_result=combined_pose_result,
             parameters={
-                "audio_weight": self.audio_weight,
-                "pose_weight": self.pose_weight,
                 "pre_impact_sec": pre_impact_sec,
                 "post_impact_sec": post_impact_sec,
-                "min_combined_confidence": min_confidence,
                 "optimization": "segment_based",
                 "segments_processed": len(segment_poses),
+                "swing_motion_gate": self.config.require_swing_motion,
+                "min_peak_wrist_speed": self.config.min_peak_wrist_speed,
+                "min_audio_confidence": self.config.min_audio_confidence,
+                "rejections": rejections,
             },
         )
 
@@ -472,11 +502,7 @@ def detect_swings(
     if progress_callback:
         progress_callback("fusion", 0, 1)
     
-    detector = SwingDetector(
-        config=config.fusion,
-        audio_weight=config.fusion.audio_weight,
-        pose_weight=config.fusion.pose_weight,
-    )
+    detector = SwingDetector(config=config.fusion)
     
     # Choose fusion method based on what data we have
     if pose_result is not None:

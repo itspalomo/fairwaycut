@@ -11,8 +11,6 @@ from fairwaycut.core.models import (
 from fairwaycut.core.config import (
     Config,
     VideoConfig,
-    VisualizationConfig,
-    VisualizationStyle,
 )
 
 __all__ = [
@@ -26,7 +24,5 @@ __all__ = [
     # Config
     "Config",
     "VideoConfig",
-    "VisualizationConfig",
-    "VisualizationStyle",
 ]
 
