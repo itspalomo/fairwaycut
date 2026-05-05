@@ -29,9 +29,10 @@ To serve at `https://fairwaycut.app/`, add a `CNAME` file containing `fairwaycut
 
 ## Editing the legal pages
 
-Before publishing, replace the bracketed placeholders in `privacy/index.html` and `terms/index.html`:
+Identifying details currently in use:
 
-- `[LEGAL NAME / DBA]`
-- `[STATE]`, `[COUNTY]` (governing-law jurisdiction)
+- DBA: **itsPalomo**
+- Governing law: **California**, venue **Los Angeles County**
+- Contact email: **itspalomo.dev@gmail.com** (placeholder; rotate to a dedicated address before broad distribution)
 
-Confirm the contact email and the effective date are correct.
+Update the effective date when publishing material changes.
