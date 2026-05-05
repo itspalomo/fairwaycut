@@ -12,13 +12,16 @@ FairwayCut is a local, offline command-line tool designed for golfers and develo
 
 ## What It Looks Like
 
-![Swing overlay demo](docs/assets/after_overlay.gif)
-
-Before (raw range video) vs after (auto-cut clip with skeleton, frosted-glass wrist-speed HUD with live sparkline, and audio waveform):
-
-| Raw capture | Auto-cut clip |
-| --- | --- |
-| ![Before](docs/assets/before_raw.jpg) | ![After](docs/assets/after_overlay.jpg) |
+<table width="100%">
+  <tr>
+    <th width="50%" align="center">Before — raw range capture</th>
+    <th width="50%" align="center">After — auto-cut clip with overlays</th>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/before_raw.gif" alt="Raw range capture" width="100%"></td>
+    <td><img src="docs/assets/after_overlay.gif" alt="Auto-cut overlay clip" width="100%"></td>
+  </tr>
+</table>
 
 ## Audio Analysis
 
