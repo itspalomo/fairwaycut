@@ -1,8 +1,13 @@
-"""Video overlay utilities for pose skeleton and audio visualization."""
+"""Video overlay utilities for pose skeleton, audio waveform, and HUDs.
+
+Visual style is ported from the reference `pose_overlay.py` in the sister
+graphics repo: purple bones, neon-green wrists with white outline rings,
+fading green wrist trail, single Gaussian-blur glow pass with a sharp pass
+on top.
+"""
 
 from collections import deque
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Optional
 import cv2
 import numpy as np
@@ -14,697 +19,403 @@ from fairwaycut.core.models import (
     ImpactEvent,
 )
 from fairwaycut.pose.landmarks import (
-    GOLF_SKELETON_CONNECTIONS,
     POSE_CONNECTIONS,
-)
-from fairwaycut.video.effects import (
-    create_transparent_layer,
-    apply_glow_effect,
-    draw_glowing_line,
-    draw_glowing_circle,
-    draw_diamond,
-    draw_hexagon,
-    draw_motion_trail,
-    draw_capsule_bone,
-    create_particle_burst,
-    depth_to_color,
-    velocity_to_intensity,
-    alpha_composite,
+    POSE_LANDMARKS,
 )
 
 
-# Default colors (BGR format)
-DEFAULT_SKELETON_COLOR = (0, 255, 128)  # Green
-DEFAULT_LANDMARK_COLOR = (0, 200, 255)  # Orange
-DEFAULT_WAVEFORM_COLOR = (163, 204, 78)  # Teal (BGR)
-DEFAULT_WAVEFORM_BG = (62, 33, 22)  # Dark blue (BGR)
-DEFAULT_IMPACT_COLOR = (0, 255, 255)  # Yellow
-DEFAULT_PHASE_COLOR = (255, 255, 255)  # White
+# ── Style palette (BGR) ──────────────────────────────────────────────────
+# Matches /Volumes/PalomoSSD/fairwaycut-graphics/tools/pose_overlay.py
+PURPLE = (255, 163, 201)        # #c9a3ff — bones + non-wrist joints
+GREEN = (60, 255, 182)          # #b6ff3c — wrists + trail
+WHITE = (255, 255, 255)
+HUD_BG = (24, 18, 14)           # near-black panel fill
+HUD_BORDER = (140, 140, 140)
+HUD_LABEL = (170, 170, 170)
+WAVEFORM_COLOR = (163, 204, 78)
+WAVEFORM_BG = (62, 33, 22)
+IMPACT_COLOR = (60, 255, 182)   # green to match wrist accent
 
+# Bone connections drawn by the skeleton renderer. Mirrors the reference
+# script's BONES list (head/torso/arms/legs).
+BONES: list[tuple[int, int]] = [
+    (POSE_LANDMARKS["nose"], POSE_LANDMARKS["left_shoulder"]),
+    (POSE_LANDMARKS["nose"], POSE_LANDMARKS["right_shoulder"]),
+    (POSE_LANDMARKS["left_shoulder"], POSE_LANDMARKS["right_shoulder"]),
+    (POSE_LANDMARKS["left_shoulder"], POSE_LANDMARKS["left_hip"]),
+    (POSE_LANDMARKS["right_shoulder"], POSE_LANDMARKS["right_hip"]),
+    (POSE_LANDMARKS["left_hip"], POSE_LANDMARKS["right_hip"]),
+    (POSE_LANDMARKS["left_shoulder"], POSE_LANDMARKS["left_elbow"]),
+    (POSE_LANDMARKS["left_elbow"], POSE_LANDMARKS["left_wrist"]),
+    (POSE_LANDMARKS["right_shoulder"], POSE_LANDMARKS["right_elbow"]),
+    (POSE_LANDMARKS["right_elbow"], POSE_LANDMARKS["right_wrist"]),
+    (POSE_LANDMARKS["left_hip"], POSE_LANDMARKS["left_knee"]),
+    (POSE_LANDMARKS["left_knee"], POSE_LANDMARKS["left_ankle"]),
+    (POSE_LANDMARKS["right_hip"], POSE_LANDMARKS["right_knee"]),
+    (POSE_LANDMARKS["right_knee"], POSE_LANDMARKS["right_ankle"]),
+]
 
-# ============================================================================
-# Rendering Mode and Color Theme System
-# ============================================================================
+JOINTS: list[int] = [
+    POSE_LANDMARKS["nose"],
+    POSE_LANDMARKS["left_shoulder"], POSE_LANDMARKS["right_shoulder"],
+    POSE_LANDMARKS["left_elbow"], POSE_LANDMARKS["right_elbow"],
+    POSE_LANDMARKS["left_hip"], POSE_LANDMARKS["right_hip"],
+    POSE_LANDMARKS["left_knee"], POSE_LANDMARKS["right_knee"],
+    POSE_LANDMARKS["left_ankle"], POSE_LANDMARKS["right_ankle"],
+]
 
-class RenderMode(Enum):
-    """Rendering mode presets."""
-    MINIMAL = "minimal"      # Clean glow, no trails (fast)
-    STANDARD = "standard"    # Glow + short trails + phase colors
-    CINEMATIC = "cinematic"  # Full effects, long trails, depth, particles
+WRISTS: list[int] = [POSE_LANDMARKS["left_wrist"], POSE_LANDMARKS["right_wrist"]]
+RIGHT_WRIST = POSE_LANDMARKS["right_wrist"]
 
-
-@dataclass
-class ColorTheme:
-    """Color theme for skeleton visualization."""
-    
-    primary: tuple[int, int, int]       # Main skeleton color
-    secondary: tuple[int, int, int]     # Secondary/accent color
-    glow: tuple[int, int, int]          # Glow color
-    joint_primary: tuple[int, int, int] # Key joint color (wrists, etc)
-    joint_secondary: tuple[int, int, int]  # Other joint color
-    trail: tuple[int, int, int]         # Motion trail color
-    
-    @classmethod
-    def default(cls) -> "ColorTheme":
-        """Default neon green theme."""
-        return cls(
-            primary=(128, 255, 0),       # Bright green
-            secondary=(0, 255, 200),     # Cyan
-            glow=(0, 255, 128),          # Green glow
-            joint_primary=(0, 255, 255), # Yellow for key joints
-            joint_secondary=(0, 200, 255),  # Orange
-            trail=(0, 255, 180),         # Trail color
-        )
-
-
-# Phase-specific color themes (BGR format)
-PHASE_THEMES: dict[SwingPhase, ColorTheme] = {
-    SwingPhase.IDLE: ColorTheme(
-        primary=(128, 128, 128),      # Gray
-        secondary=(100, 100, 100),
-        glow=(80, 80, 80),
-        joint_primary=(150, 150, 150),
-        joint_secondary=(120, 120, 120),
-        trail=(100, 100, 100),
-    ),
-    SwingPhase.ADDRESS: ColorTheme(
-        primary=(255, 200, 100),      # Light blue/cyan
-        secondary=(255, 180, 50),
-        glow=(255, 220, 150),
-        joint_primary=(255, 255, 100),
-        joint_secondary=(255, 200, 80),
-        trail=(255, 200, 120),
-    ),
-    SwingPhase.BACKSWING: ColorTheme(
-        primary=(255, 100, 200),      # Purple/magenta
-        secondary=(255, 50, 150),
-        glow=(255, 120, 220),
-        joint_primary=(255, 150, 255),
-        joint_secondary=(255, 100, 200),
-        trail=(255, 80, 180),
-    ),
-    SwingPhase.TOP: ColorTheme(
-        primary=(255, 50, 255),       # Bright magenta
-        secondary=(200, 0, 200),
-        glow=(255, 100, 255),
-        joint_primary=(255, 150, 255),
-        joint_secondary=(255, 80, 255),
-        trail=(255, 50, 220),
-    ),
-    SwingPhase.DOWNSWING: ColorTheme(
-        primary=(0, 140, 255),        # Orange/amber
-        secondary=(0, 100, 255),
-        glow=(0, 180, 255),
-        joint_primary=(0, 200, 255),
-        joint_secondary=(0, 150, 255),
-        trail=(0, 120, 255),
-    ),
-    SwingPhase.IMPACT: ColorTheme(
-        primary=(0, 255, 255),        # Bright yellow/gold
-        secondary=(0, 220, 255),
-        glow=(100, 255, 255),
-        joint_primary=(255, 255, 255),  # White flash
-        joint_secondary=(150, 255, 255),
-        trail=(0, 255, 255),
-    ),
-    SwingPhase.FOLLOW_THROUGH: ColorTheme(
-        primary=(200, 255, 0),        # Green/teal
-        secondary=(150, 255, 50),
-        glow=(180, 255, 100),
-        joint_primary=(200, 255, 100),
-        joint_secondary=(150, 255, 50),
-        trail=(180, 255, 80),
-    ),
-    SwingPhase.FINISH: ColorTheme(
-        primary=(255, 150, 0),        # Teal/blue
-        secondary=(255, 100, 50),
-        glow=(255, 180, 100),
-        joint_primary=(255, 200, 100),
-        joint_secondary=(255, 150, 50),
-        trail=(255, 130, 80),
-    ),
-}
-
-
-# ============================================================================
-# Pose History Buffer for Motion Trails
-# ============================================================================
-
-@dataclass
-class PoseHistoryEntry:
-    """Single entry in pose history."""
-    pose: FramePose
-    timestamp: float
-    velocities: dict[int, float] = field(default_factory=dict)  # landmark_idx -> velocity
-
-
-class PoseHistory:
-    """
-    Circular buffer storing recent poses for motion trail rendering.
-    
-    Calculates velocities between frames for intensity modulation.
-    """
-    
-    def __init__(self, max_size: int = 15):
-        """
-        Initialize pose history buffer.
-        
-        Args:
-            max_size: Maximum number of poses to store.
-        """
-        self.max_size = max_size
-        self._buffer: deque[PoseHistoryEntry] = deque(maxlen=max_size)
-        self._last_positions: dict[int, tuple[float, float, float]] = {}
-    
-    def add(self, pose: FramePose, timestamp: float) -> None:
-        """
-        Add a new pose to the history.
-        
-        Args:
-            pose: FramePose to add.
-            timestamp: Current timestamp.
-        """
-        velocities = {}
-        
-        if pose.is_valid and self._last_positions:
-            # Calculate velocities for key landmarks
-            for idx, lm in enumerate(pose.landmarks):
-                if idx in self._last_positions:
-                    prev = self._last_positions[idx]
-                    dx = lm.x - prev[0]
-                    dy = lm.y - prev[1]
-                    dz = lm.z - prev[2]
-                    velocities[idx] = np.sqrt(dx*dx + dy*dy + dz*dz)
-        
-        # Update last positions
-        if pose.is_valid:
-            self._last_positions = {
-                idx: (lm.x, lm.y, lm.z)
-                for idx, lm in enumerate(pose.landmarks)
-            }
-        
-        self._buffer.append(PoseHistoryEntry(
-            pose=pose,
-            timestamp=timestamp,
-            velocities=velocities,
-        ))
-    
-    def get_trail_points(
-        self,
-        landmark_idx: int,
-        width: int,
-        height: int,
-    ) -> list[tuple[int, int]]:
-        """
-        Get pixel coordinates for a landmark's motion trail.
-        
-        Args:
-            landmark_idx: Index of the landmark to track.
-            width: Frame width for coordinate conversion.
-            height: Frame height for coordinate conversion.
-        
-        Returns:
-            List of (x, y) pixel coordinates from oldest to newest.
-        """
-        points = []
-        for entry in self._buffer:
-            if entry.pose.is_valid and landmark_idx < len(entry.pose.landmarks):
-                lm = entry.pose.landmarks[landmark_idx]
-                if lm.visibility > 0.5:
-                    points.append(lm.to_pixel(width, height))
-        return points
-    
-    def get_velocity(self, landmark_idx: int) -> float:
-        """
-        Get the current velocity of a landmark.
-        
-        Args:
-            landmark_idx: Index of the landmark.
-        
-        Returns:
-            Velocity magnitude (0 if not available).
-        """
-        if not self._buffer:
-            return 0.0
-        latest = self._buffer[-1]
-        return latest.velocities.get(landmark_idx, 0.0)
-    
-    def get_max_velocity(self) -> float:
-        """Get the maximum velocity across all landmarks in current frame."""
-        if not self._buffer:
-            return 0.0
-        latest = self._buffer[-1]
-        return max(latest.velocities.values()) if latest.velocities else 0.0
-    
-    def clear(self) -> None:
-        """Clear the history buffer."""
-        self._buffer.clear()
-        self._last_positions.clear()
-    
-    def __len__(self) -> int:
-        return len(self._buffer)
-
-
-# ============================================================================
-# Skeleton Renderer Class
-# ============================================================================
 
 @dataclass
 class SkeletonRendererOptions:
-    """Configuration options for SkeletonRenderer."""
-    
-    # Rendering mode
-    mode: RenderMode = RenderMode.STANDARD
-    
-    # Basic settings
-    thickness: int = 3
-    joint_radius: int = 5
-    min_visibility: float = 0.5
-    golf_mode: bool = True
-    
-    # Glow settings
-    enable_glow: bool = True
-    glow_passes: list[tuple[int, float]] = field(
-        default_factory=lambda: [(31, 0.3), (15, 0.5), (7, 0.7)]
-    )
-    
-    # Trail settings
-    enable_trails: bool = True
-    trail_length: int = 12
-    trail_landmarks: list[int] = field(
-        default_factory=lambda: [15, 16]  # Wrists by default
-    )
-    
-    # Depth coloring
-    enable_depth_coloring: bool = False
-    near_color: tuple[int, int, int] = (0, 100, 255)   # Warm (close)
-    far_color: tuple[int, int, int] = (255, 100, 0)    # Cool (far)
-    
-    # Velocity effects
-    enable_velocity_intensity: bool = True
-    velocity_min: float = 0.01
-    velocity_max: float = 0.15
-    
-    # Phase coloring
-    enable_phase_colors: bool = True
-    
-    # Joint styling
-    joint_style: str = "circle"  # "circle", "diamond", "hexagon"
-    key_joints: list[int] = field(
-        default_factory=lambda: [15, 16, 13, 14, 11, 12]  # Wrists, elbows, shoulders
-    )
-    
-    # Bone styling
-    bone_style: str = "line"  # "line", "capsule"
-    
-    # Impact effects
-    enable_impact_particles: bool = True
-    
-    @classmethod
-    def from_mode(cls, mode: RenderMode) -> "SkeletonRendererOptions":
-        """Create options from a preset mode."""
-        if mode == RenderMode.MINIMAL:
-            return cls(
-                mode=mode,
-                enable_glow=True,
-                enable_trails=False,
-                enable_depth_coloring=False,
-                enable_velocity_intensity=False,
-                enable_phase_colors=True,
-                joint_style="circle",
-                bone_style="line",
-                glow_passes=[(15, 0.4), (7, 0.6)],
-            )
-        elif mode == RenderMode.CINEMATIC:
-            return cls(
-                mode=mode,
-                enable_glow=True,
-                enable_trails=True,
-                trail_length=18,
-                enable_depth_coloring=True,
-                enable_velocity_intensity=True,
-                enable_phase_colors=True,
-                joint_style="diamond",
-                bone_style="capsule",
-                enable_impact_particles=True,
-                glow_passes=[(41, 0.25), (21, 0.4), (11, 0.6), (5, 0.8)],
-            )
-        else:  # STANDARD
-            return cls(mode=mode)
+    """Knobs for the skeleton renderer."""
+
+    bone_thickness: int = 4
+    joint_radius: int = 7
+    wrist_radius: int = 11
+    glow_blur: int = 23           # Gaussian kernel size (odd)
+    trail_length: int = 50         # Right-wrist positions kept for the trail
+    min_visibility: float = 0.4
 
 
 class SkeletonRenderer:
+    """Render pose skeleton in the project's standard look.
+
+    Stages per frame:
+      1. Draw bones, joints, wrists, and trail onto a black "glow" layer.
+      2. Gaussian-blur that layer and additively blend it into the frame.
+      3. Redraw the same elements sharply on top of the glow.
     """
-    Advanced skeleton renderer with multi-pass effects.
-    
-    Provides neon glow, motion trails, depth coloring, phase-aware theming,
-    and velocity-based intensity modulation.
-    """
-    
-    def __init__(
-        self,
-        options: Optional[SkeletonRendererOptions] = None,
-    ):
-        """
-        Initialize the skeleton renderer.
-        
-        Args:
-            options: Rendering options (uses defaults if None).
-        """
+
+    def __init__(self, options: Optional[SkeletonRendererOptions] = None):
         self.options = options or SkeletonRendererOptions()
-        self.history = PoseHistory(max_size=self.options.trail_length)
-        self._current_theme = ColorTheme.default()
-    
-    def set_mode(self, mode: RenderMode) -> None:
-        """Switch rendering mode."""
-        self.options = SkeletonRendererOptions.from_mode(mode)
-        self.history = PoseHistory(max_size=self.options.trail_length)
-    
-    def render(
+        self._wrist_trail: deque[tuple[int, int]] = deque(
+            maxlen=self.options.trail_length
+        )
+        # Buffers for HUD use (peak wrist speed in normalized units / sec).
+        self._last_right_wrist: Optional[tuple[float, float, float]] = None
+        self._current_speed_norm: float = 0.0
+        self._peak_speed_norm: float = 0.0
+        # Recent speed history for the HUD sparkline (~last 1.5 s @ 60 fps).
+        self._speed_history: deque[float] = deque(maxlen=90)
+
+    def reset(self) -> None:
+        self._wrist_trail.clear()
+        self._last_right_wrist = None
+        self._current_speed_norm = 0.0
+        self._peak_speed_norm = 0.0
+        self._speed_history.clear()
+
+    @property
+    def current_wrist_speed(self) -> float:
+        """Latest right-wrist speed in normalized-coords per second."""
+        return self._current_speed_norm
+
+    @property
+    def peak_wrist_speed(self) -> float:
+        """Peak right-wrist speed seen so far in normalized-coords per second."""
+        return self._peak_speed_norm
+
+    @property
+    def recent_wrist_speeds(self) -> list[float]:
+        """Trailing wrist-speed window for the HUD sparkline."""
+        return list(self._speed_history)
+
+    def _to_xy(self, lm, w: int, h: int) -> tuple[int, int]:
+        return int(lm.x * w), int(lm.y * h)
+
+    def _update_speed(self, pose: FramePose) -> None:
+        rw = pose.landmarks[RIGHT_WRIST]
+        if rw.visibility < self.options.min_visibility:
+            self._speed_history.append(self._current_speed_norm)
+            return
+        if self._last_right_wrist is not None:
+            prev_x, prev_y, prev_t = self._last_right_wrist
+            dt = pose.timestamp - prev_t
+            if dt > 0:
+                dx = rw.x - prev_x
+                dy = rw.y - prev_y
+                speed = float(np.sqrt(dx * dx + dy * dy)) / dt
+                self._current_speed_norm = speed
+                if speed > self._peak_speed_norm:
+                    self._peak_speed_norm = speed
+        self._last_right_wrist = (rw.x, rw.y, pose.timestamp)
+        self._speed_history.append(self._current_speed_norm)
+
+    def _draw_pass(
         self,
-        frame: np.ndarray,
+        canvas: np.ndarray,
         pose: FramePose,
-        phase: SwingPhase = SwingPhase.IDLE,
-        is_impact: bool = False,
-        custom_theme: Optional[ColorTheme] = None,
-    ) -> np.ndarray:
-        """
-        Render skeleton with all effects onto frame.
-        
-        Args:
-            frame: Input frame (BGR).
-            pose: Current pose to render.
-            phase: Current swing phase for theming.
-            is_impact: Whether this is an impact frame.
-            custom_theme: Optional custom color theme override.
-        
-        Returns:
-            Frame with skeleton overlay.
-        """
+        w: int,
+        h: int,
+        glow_pass: bool,
+    ) -> None:
+        opts = self.options
+        bone_thick = opts.bone_thickness + (4 if glow_pass else 0)
+        joint_r = opts.joint_radius + (4 if glow_pass else 0)
+        wrist_r = opts.wrist_radius + (6 if glow_pass else 0)
+
+        for a, b in BONES:
+            la, lb = pose.landmarks[a], pose.landmarks[b]
+            if la.visibility < opts.min_visibility or lb.visibility < opts.min_visibility:
+                continue
+            cv2.line(
+                canvas, self._to_xy(la, w, h), self._to_xy(lb, w, h),
+                PURPLE, bone_thick, cv2.LINE_AA,
+            )
+
+        for jid in JOINTS:
+            lm = pose.landmarks[jid]
+            if lm.visibility < opts.min_visibility:
+                continue
+            pt = self._to_xy(lm, w, h)
+            cv2.circle(canvas, pt, joint_r, PURPLE, -1, cv2.LINE_AA)
+            if not glow_pass:
+                cv2.circle(canvas, pt, joint_r, WHITE, 1, cv2.LINE_AA)
+
+        for wid in WRISTS:
+            lm = pose.landmarks[wid]
+            if lm.visibility < opts.min_visibility:
+                continue
+            pt = self._to_xy(lm, w, h)
+            cv2.circle(canvas, pt, wrist_r, GREEN, -1, cv2.LINE_AA)
+            if not glow_pass:
+                cv2.circle(canvas, pt, wrist_r, WHITE, 2, cv2.LINE_AA)
+
+        # Right-wrist trail — fades from black (oldest) to green (newest).
+        trail = list(self._wrist_trail)
+        if len(trail) >= 2:
+            for i in range(1, len(trail)):
+                p0, p1 = trail[i - 1], trail[i]
+                alpha = i / len(trail)
+                color = (
+                    int(GREEN[0] * alpha),
+                    int(GREEN[1] * alpha),
+                    int(GREEN[2] * alpha),
+                )
+                base = max(1, int(2 + alpha * (4 if glow_pass else 3)))
+                thick = base + (4 if glow_pass else 0)
+                cv2.line(canvas, p0, p1, color, thick, cv2.LINE_AA)
+
+    def render(self, frame: np.ndarray, pose: FramePose) -> np.ndarray:
         if not pose.is_valid:
             return frame
-        
+
         h, w = frame.shape[:2]
-        
-        # Update pose history for trails
-        self.history.add(pose, pose.timestamp)
-        
-        # Select color theme
-        if custom_theme:
-            theme = custom_theme
-        elif self.options.enable_phase_colors:
-            theme = PHASE_THEMES.get(phase, ColorTheme.default())
-        else:
-            theme = ColorTheme.default()
-        
-        self._current_theme = theme
-        
-        # Create skeleton layer (BGRA for alpha compositing)
-        skeleton_layer = create_transparent_layer(w, h)
-        
-        # Get connections
-        connections = (
-            GOLF_SKELETON_CONNECTIONS if self.options.golf_mode
-            else POSE_CONNECTIONS
-        )
-        
-        # Calculate global intensity based on max velocity
-        max_vel = self.history.get_max_velocity()
-        global_intensity = 1.0
-        if self.options.enable_velocity_intensity:
-            global_intensity = velocity_to_intensity(
-                max_vel,
-                self.options.velocity_min,
-                self.options.velocity_max,
-                min_intensity=0.7,
-                max_intensity=1.5,
-            )
-        
-        # === Pass 1: Draw motion trails ===
-        if self.options.enable_trails and len(self.history) > 2:
-            skeleton_layer = self._draw_trails(skeleton_layer, w, h, theme)
-        
-        # === Pass 2: Draw bones ===
-        skeleton_layer = self._draw_bones(
-            skeleton_layer, pose, connections, w, h, theme, global_intensity
-        )
-        
-        # === Pass 3: Draw joints ===
-        skeleton_layer = self._draw_joints(
-            skeleton_layer, pose, w, h, theme, global_intensity
-        )
-        
-        # === Pass 4: Impact particles ===
-        if is_impact and self.options.enable_impact_particles:
-            # Add particles at wrists
-            for wrist_idx in [15, 16]:
-                if wrist_idx < len(pose.landmarks):
-                    wrist = pose.landmarks[wrist_idx]
-                    if wrist.visibility > self.options.min_visibility:
-                        pt = wrist.to_pixel(w, h)
-                        skeleton_layer = create_particle_burst(
-                            skeleton_layer,
-                            pt,
-                            theme.joint_primary,
-                            num_particles=20,
-                            radius=50,
-                            particle_size=4,
-                        )
-        
-        # === Final: Apply glow and composite ===
-        if self.options.enable_glow:
-            result = apply_glow_effect(
-                frame,
-                skeleton_layer,
-                glow_passes=self.options.glow_passes,
-                blend_mode="additive",
-            )
-        else:
-            result = alpha_composite(frame, skeleton_layer)
-        
-        return result
-    
-    def _draw_trails(
-        self,
-        layer: np.ndarray,
-        w: int,
-        h: int,
-        theme: ColorTheme,
-    ) -> np.ndarray:
-        """Draw motion trails for tracked landmarks."""
-        for landmark_idx in self.options.trail_landmarks:
-            points = self.history.get_trail_points(landmark_idx, w, h)
-            if len(points) >= 2:
-                layer = draw_motion_trail(
-                    layer,
-                    points,
-                    theme.trail,
-                    max_thickness=self.options.thickness + 2,
-                    min_alpha=30,
-                    max_alpha=180,
-                )
-        return layer
-    
-    def _draw_bones(
-        self,
-        layer: np.ndarray,
-        pose: FramePose,
-        connections: list[tuple[int, int]],
-        w: int,
-        h: int,
-        theme: ColorTheme,
-        intensity: float,
-    ) -> np.ndarray:
-        """Draw skeleton bones."""
-        # Sort by depth if depth coloring enabled
-        if self.options.enable_depth_coloring:
-            # Sort connections by average Z (back to front)
-            def get_avg_z(conn: tuple[int, int]) -> float:
-                start_idx, end_idx = conn
-                if start_idx >= len(pose.landmarks) or end_idx >= len(pose.landmarks):
-                    return 0.0
-                return (pose.landmarks[start_idx].z + pose.landmarks[end_idx].z) / 2
-            
-            connections = sorted(connections, key=get_avg_z, reverse=True)
-        
-        for start_idx, end_idx in connections:
-            if start_idx >= len(pose.landmarks) or end_idx >= len(pose.landmarks):
-                continue
-            
-            start_lm = pose.landmarks[start_idx]
-            end_lm = pose.landmarks[end_idx]
-            
-            # Check visibility
-            if (start_lm.visibility < self.options.min_visibility or
-                end_lm.visibility < self.options.min_visibility):
-                continue
-            
-            start_pt = start_lm.to_pixel(w, h)
-            end_pt = end_lm.to_pixel(w, h)
-            
-            # Determine bone color
-            if self.options.enable_depth_coloring:
-                avg_z = (start_lm.z + end_lm.z) / 2
-                bone_color = depth_to_color(
-                    avg_z,
-                    self.options.near_color,
-                    self.options.far_color,
-                )
-            else:
-                bone_color = theme.primary
-            
-            # Modulate color by intensity
-            if intensity > 1.0:
-                bone_color = tuple(
-                    min(255, int(c * intensity)) for c in bone_color
-                )
-            
-            # Draw bone
-            if self.options.bone_style == "capsule":
-                layer = draw_capsule_bone(
-                    layer, start_pt, end_pt, bone_color,
-                    radius=self.options.thickness + 2,
-                )
-            else:
-                layer = draw_glowing_line(
-                    layer, start_pt, end_pt, bone_color,
-                    thickness=self.options.thickness,
-                    glow_radius=6,
-                )
-        
-        return layer
-    
-    def _draw_joints(
-        self,
-        layer: np.ndarray,
-        pose: FramePose,
-        w: int,
-        h: int,
-        theme: ColorTheme,
-        intensity: float,
-    ) -> np.ndarray:
-        """Draw skeleton joints."""
-        for idx, lm in enumerate(pose.landmarks):
-            if lm.visibility < self.options.min_visibility:
-                continue
-            
-            pt = lm.to_pixel(w, h)
-            
-            # Determine if this is a key joint
-            is_key = idx in self.options.key_joints
-            
-            # Get joint-specific velocity for pulsing effect
-            velocity = self.history.get_velocity(idx)
-            vel_scale = 1.0
-            if self.options.enable_velocity_intensity:
-                vel_scale = velocity_to_intensity(
-                    velocity,
-                    self.options.velocity_min,
-                    self.options.velocity_max,
-                    min_intensity=0.8,
-                    max_intensity=1.3,
-                )
-            
-            # Calculate radius with velocity scaling
-            base_radius = self.options.joint_radius
-            if is_key:
-                base_radius = int(base_radius * 1.3)
-            radius = int(base_radius * vel_scale)
-            
-            # Select color
-            if self.options.enable_depth_coloring:
-                joint_color = depth_to_color(
-                    lm.z,
-                    self.options.near_color,
-                    self.options.far_color,
-                )
-            else:
-                joint_color = theme.joint_primary if is_key else theme.joint_secondary
-            
-            # Draw joint based on style
-            if self.options.joint_style == "diamond" and is_key:
-                layer = draw_diamond(layer, pt, radius, joint_color, glow_radius=4)
-            elif self.options.joint_style == "hexagon" and is_key:
-                layer = draw_hexagon(layer, pt, radius, joint_color, glow_radius=4)
-            else:
-                layer = draw_glowing_circle(
-                    layer, pt, radius, joint_color, glow_radius=4
-                )
-        
-        return layer
-    
-    def reset(self) -> None:
-        """Reset the renderer state (clears history)."""
-        self.history.clear()
+        opts = self.options
 
+        # Track right-wrist for trail + speed readouts.
+        rw = pose.landmarks[RIGHT_WRIST]
+        if rw.visibility >= opts.min_visibility:
+            self._wrist_trail.append((int(rw.x * w), int(rw.y * h)))
+        self._update_speed(pose)
 
-def draw_pose_skeleton(
-    frame: np.ndarray,
-    pose: FramePose,
-    color: tuple[int, int, int] = DEFAULT_SKELETON_COLOR,
-    landmark_color: Optional[tuple[int, int, int]] = None,
-    thickness: int = 2,
-    landmark_radius: int = 4,
-    min_visibility: float = 0.5,
-    golf_mode: bool = True,
-) -> np.ndarray:
-    """
-    Draw pose skeleton overlay on a video frame.
-    
-    Args:
-        frame: Input frame (will be modified in place).
-        pose: FramePose with landmarks to draw.
-        color: BGR color for skeleton lines.
-        landmark_color: BGR color for landmarks (None = same as skeleton).
-        thickness: Line thickness.
-        landmark_radius: Radius of landmark circles.
-        min_visibility: Minimum visibility threshold to draw landmark.
-        golf_mode: Use simplified golf-specific skeleton.
-    
-    Returns:
-        Frame with skeleton overlay.
-    """
-    if not pose.is_valid:
+        # 1. Glow layer.
+        glow = np.zeros_like(frame)
+        self._draw_pass(glow, pose, w, h, glow_pass=True)
+        k = opts.glow_blur if opts.glow_blur % 2 == 1 else opts.glow_blur + 1
+        glow_blurred = cv2.GaussianBlur(glow, (k, k), 0)
+        cv2.add(frame, glow_blurred, frame)
+
+        # 2. Sharp pass on top.
+        self._draw_pass(frame, pose, w, h, glow_pass=False)
+
         return frame
-    
+
+
+# ── HUD: liquid-glass wrist-speed panel + small badge ──────────────────
+
+def _draw_glass_panel(
+    frame: np.ndarray,
+    top_left: tuple[int, int],
+    bottom_right: tuple[int, int],
+    *,
+    tint: tuple[int, int, int] = (28, 22, 18),
+    tint_alpha: float = 0.55,
+    border: tuple[int, int, int] = (210, 210, 210),
+    border_alpha: float = 0.35,
+    highlight_alpha: float = 0.18,
+) -> None:
+    """Render a translucent "liquid glass" rectangle in-place.
+
+    Uses a Gaussian-blurred ROI as a frosted backdrop, then overlays a
+    subtle dark tint, an inner highlight strip at the top, and a thin
+    light border. No rounded corners (cv2 lacks them natively); the
+    border + blur reads as glass without them.
+    """
+    x1, y1 = top_left
+    x2, y2 = bottom_right
     h, w = frame.shape[:2]
-    landmark_color = landmark_color or color
-    
-    # Choose connection set
-    connections = GOLF_SKELETON_CONNECTIONS if golf_mode else POSE_CONNECTIONS
-    
-    # Draw connections
-    for start_idx, end_idx in connections:
-        if start_idx >= len(pose.landmarks) or end_idx >= len(pose.landmarks):
-            continue
-        
-        start_lm = pose.landmarks[start_idx]
-        end_lm = pose.landmarks[end_idx]
-        
-        # Check visibility
-        if start_lm.visibility < min_visibility or end_lm.visibility < min_visibility:
-            continue
-        
-        # Convert to pixel coordinates
-        start_pt = start_lm.to_pixel(w, h)
-        end_pt = end_lm.to_pixel(w, h)
-        
-        # Draw line
-        cv2.line(frame, start_pt, end_pt, color, thickness, cv2.LINE_AA)
-    
-    # Draw landmarks
-    for lm in pose.landmarks:
-        if lm.visibility < min_visibility:
-            continue
-        
-        pt = lm.to_pixel(w, h)
-        cv2.circle(frame, pt, landmark_radius, landmark_color, -1, cv2.LINE_AA)
+    x1 = max(0, x1); y1 = max(0, y1)
+    x2 = min(w, x2); y2 = min(h, y2)
+    if x2 - x1 < 4 or y2 - y1 < 4:
+        return
+
+    roi = frame[y1:y2, x1:x2]
+
+    # Frosted backdrop.
+    blurred = cv2.GaussianBlur(roi, (0, 0), sigmaX=14, sigmaY=14)
+    np.copyto(roi, blurred)
+
+    # Dark tint over the blur.
+    tint_layer = np.full_like(roi, tint)
+    cv2.addWeighted(tint_layer, tint_alpha, roi, 1 - tint_alpha, 0, roi)
+
+    # Top inner highlight (gradient from white-ish to transparent).
+    highlight_h = max(2, (y2 - y1) // 6)
+    if highlight_h > 1:
+        grad = np.linspace(highlight_alpha, 0.0, highlight_h, dtype=np.float32)
+        white = np.full((highlight_h, x2 - x1, 3), 255, dtype=np.uint8)
+        target = roi[:highlight_h]
+        for i in range(highlight_h):
+            cv2.addWeighted(white[i:i+1], float(grad[i]), target[i:i+1], 1 - float(grad[i]), 0, target[i:i+1])
+
+    # Border.
+    border_layer = frame.copy()
+    cv2.rectangle(border_layer, (x1, y1), (x2 - 1, y2 - 1), border, 1, cv2.LINE_AA)
+    cv2.addWeighted(border_layer, border_alpha, frame, 1 - border_alpha, 0, frame)
+
+
+def _draw_sparkline(
+    frame: np.ndarray,
+    values: list[float],
+    rect: tuple[int, int, int, int],
+    *,
+    line_color: tuple[int, int, int] = GREEN,
+    fill_color: tuple[int, int, int] = GREEN,
+    fill_alpha: float = 0.18,
+) -> None:
+    """Draw a sparkline (line + soft fill) inside `rect = (x, y, w, h)`."""
+    x, y, w, h = rect
+    if w < 4 or h < 4 or len(values) < 2:
+        return
+
+    vmax = max(values)
+    if vmax <= 0:
+        # Flat line at the bottom.
+        cv2.line(frame, (x, y + h - 1), (x + w - 1, y + h - 1), line_color, 1, cv2.LINE_AA)
+        return
+
+    n = len(values)
+    pts = np.empty((n, 2), dtype=np.int32)
+    for i, v in enumerate(values):
+        px = x + int(i * (w - 1) / max(1, n - 1))
+        py = y + h - 1 - int((v / vmax) * (h - 2))
+        pts[i] = (px, py)
+
+    # Soft fill below the line.
+    fill_pts = np.vstack([
+        pts,
+        [[x + w - 1, y + h - 1], [x, y + h - 1]],
+    ]).reshape(-1, 1, 2)
+    fill_layer = frame.copy()
+    cv2.fillPoly(fill_layer, [fill_pts], fill_color, cv2.LINE_AA)
+    cv2.addWeighted(fill_layer, fill_alpha, frame, 1 - fill_alpha, 0, frame)
+
+    # Line.
+    cv2.polylines(frame, [pts.reshape(-1, 1, 2)], False, line_color, 2, cv2.LINE_AA)
+    # Bright dot at the tip.
+    cv2.circle(frame, (int(pts[-1, 0]), int(pts[-1, 1])), 3, line_color, -1, cv2.LINE_AA)
+    cv2.circle(frame, (int(pts[-1, 0]), int(pts[-1, 1])), 4, WHITE, 1, cv2.LINE_AA)
+
+
+def draw_pose_hud(
+    frame: np.ndarray,
+    *,
+    current_speed_mps: Optional[float] = None,
+    peak_speed_mps: Optional[float] = None,
+    speed_history_mps: Optional[list[float]] = None,
+    landmark_count: int = 33,
+    show_badge: bool = True,
+) -> np.ndarray:
+    """Draw a liquid-glass HUD with wrist velocity + sparkline + badge.
+
+    `*_speed_mps` values are in metres/second (the caller scales from
+    normalized pose coords). `speed_history_mps` is the trailing window
+    used for the sparkline. All inputs are optional.
+    """
+    h, w = frame.shape[:2]
+    pad = 14
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    if show_badge:
+        badge_text = "MediaPipe Pose"
+        scale, thick = 0.45, 1
+        (tw, th), _ = cv2.getTextSize(badge_text, font, scale, thick)
+        bx, by = pad, pad
+        bw, bh = tw + 28, th + 14
+        _draw_glass_panel(frame, (bx, by), (bx + bw, by + bh))
+        cv2.circle(frame, (bx + 12, by + bh // 2), 3, PURPLE, -1, cv2.LINE_AA)
+        cv2.putText(
+            frame, badge_text, (bx + 22, by + th + 7),
+            font, scale, (235, 220, 255), thick, cv2.LINE_AA,
+        )
+
+        # "33 landmarks" tag, bottom-left.
+        tag_text = f"{landmark_count} landmarks"
+        (tw2, th2), _ = cv2.getTextSize(tag_text, font, 0.4, 1)
+        bw2, bh2 = tw2 + 20, th2 + 12
+        ty = h - pad - bh2
+        _draw_glass_panel(frame, (pad, ty), (pad + bw2, ty + bh2))
+        cv2.putText(
+            frame, tag_text, (pad + 10, ty + th2 + 5),
+            font, 0.4, (220, 220, 220), 1, cv2.LINE_AA,
+        )
+
+    if current_speed_mps is None and peak_speed_mps is None:
+        return frame
+
+    panel_w = 250
+    row_h = 30
+    rows = (1 if current_speed_mps is not None else 0) + (1 if peak_speed_mps is not None else 0)
+    spark_h = 44 if speed_history_mps else 0
+    panel_h = rows * row_h + spark_h + 22
+    px = w - panel_w - pad
+    py = pad
+
+    _draw_glass_panel(frame, (px, py), (px + panel_w, py + panel_h))
+
+    def _row(label: str, value_mps: float, y_offset: int) -> int:
+        cv2.putText(
+            frame, label.upper(), (px + 14, py + y_offset),
+            font, 0.36, (200, 200, 210), 1, cv2.LINE_AA,
+        )
+        value_text = f"{value_mps:5.1f}"
+        (vw, vh), _ = cv2.getTextSize(value_text, font, 0.8, 2)
+        cv2.putText(
+            frame, value_text, (px + 14, y_offset + py + 22),
+            font, 0.8, GREEN, 2, cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame, "m/s", (px + 14 + vw + 6, y_offset + py + 22),
+            font, 0.42, (200, 200, 210), 1, cv2.LINE_AA,
+        )
+        return y_offset + row_h
+
+    y_cursor = 14
+    if current_speed_mps is not None:
+        y_cursor = _row("wrist speed", current_speed_mps, y_cursor)
+    if peak_speed_mps is not None:
+        y_cursor = _row("peak", peak_speed_mps, y_cursor)
+
+    if speed_history_mps:
+        spark_pad = 14
+        rect = (
+            px + spark_pad,
+            py + y_cursor + 4,
+            panel_w - spark_pad * 2,
+            spark_h - 8,
+        )
+        _draw_sparkline(frame, speed_history_mps, rect)
 
     return frame
 
 
+# ── Audio waveform ──────────────────────────────────────────────────────
+
 def _compute_waveform_envelope(samples: np.ndarray, num_bins: int) -> np.ndarray:
-    """Compute max-amplitude bins for a waveform strip."""
     envelope = np.zeros(num_bins, dtype=np.float32)
     if num_bins <= 0 or len(samples) == 0:
         return envelope
@@ -731,12 +442,11 @@ def build_waveform_strip(
     frame_width: int,
     window_sec: float = 5.0,
     height: int = 80,
-    color: tuple[int, int, int] = DEFAULT_WAVEFORM_COLOR,
-    bg_color: tuple[int, int, int] = DEFAULT_WAVEFORM_BG,
+    color: tuple[int, int, int] = WAVEFORM_COLOR,
+    bg_color: tuple[int, int, int] = WAVEFORM_BG,
     impact_events: Optional[list[ImpactEvent]] = None,
-    impact_color: tuple[int, int, int] = DEFAULT_IMPACT_COLOR,
+    impact_color: tuple[int, int, int] = IMPACT_COLOR,
 ) -> np.ndarray:
-    """Render a waveform strip for a specific playback time."""
     waveform_bg = np.full((height, frame_width, 3), bg_color, dtype=np.uint8)
     if frame_width <= 0 or height <= 0:
         return waveform_bg
@@ -800,12 +510,11 @@ def build_waveform_strip_sequence(
     frame_width: int,
     window_sec: float = 5.0,
     height: int = 80,
-    color: tuple[int, int, int] = DEFAULT_WAVEFORM_COLOR,
-    bg_color: tuple[int, int, int] = DEFAULT_WAVEFORM_BG,
+    color: tuple[int, int, int] = WAVEFORM_COLOR,
+    bg_color: tuple[int, int, int] = WAVEFORM_BG,
     impact_events: Optional[list[ImpactEvent]] = None,
-    impact_color: tuple[int, int, int] = DEFAULT_IMPACT_COLOR,
+    impact_color: tuple[int, int, int] = IMPACT_COLOR,
 ) -> list[np.ndarray]:
-    """Pre-render waveform strips for a sequence of frame timestamps."""
     return [
         build_waveform_strip(
             audio,
@@ -828,38 +537,15 @@ def draw_audio_waveform(
     current_time: float,
     window_sec: float = 5.0,
     height: int = 80,
-    color: tuple[int, int, int] = DEFAULT_WAVEFORM_COLOR,
-    bg_color: tuple[int, int, int] = DEFAULT_WAVEFORM_BG,
+    color: tuple[int, int, int] = WAVEFORM_COLOR,
+    bg_color: tuple[int, int, int] = WAVEFORM_BG,
     impact_events: Optional[list[ImpactEvent]] = None,
-    impact_color: tuple[int, int, int] = DEFAULT_IMPACT_COLOR,
+    impact_color: tuple[int, int, int] = IMPACT_COLOR,
     position: str = "bottom",
 ) -> np.ndarray:
-    """
-    Draw audio waveform overlay on a video frame.
-    
-    Args:
-        frame: Input frame (will be modified in place).
-        audio: AudioData to visualize.
-        current_time: Current playback time in seconds.
-        window_sec: Width of waveform window in seconds.
-        height: Height of waveform strip in pixels.
-        color: BGR color for waveform.
-        bg_color: BGR color for background.
-        impact_events: Optional list of impact events to mark.
-        impact_color: BGR color for impact markers.
-        position: "top" or "bottom" of frame.
-    
-    Returns:
-        Frame with waveform overlay.
-    """
     frame_h, frame_w = frame.shape[:2]
-    
-    # Calculate waveform position
-    if position == "top":
-        y_start = 0
-    else:
-        y_start = frame_h - height
-    
+    y_start = 0 if position == "top" else frame_h - height
+
     waveform_bg = build_waveform_strip(
         audio,
         current_time=current_time,
@@ -871,239 +557,155 @@ def draw_audio_waveform(
         impact_events=impact_events,
         impact_color=impact_color,
     )
-    
-    # Paste waveform onto frame
     frame[y_start:y_start + height, :] = waveform_bg
-    
     return frame
+
+
+# ── Phase / impact / timestamp text overlays ────────────────────────────
+
+PHASE_NAMES: dict[SwingPhase, str] = {
+    SwingPhase.IDLE: "IDLE",
+    SwingPhase.ADDRESS: "ADDRESS",
+    SwingPhase.BACKSWING: "BACKSWING",
+    SwingPhase.TOP: "TOP",
+    SwingPhase.DOWNSWING: "DOWNSWING",
+    SwingPhase.IMPACT: "IMPACT",
+    SwingPhase.FOLLOW_THROUGH: "FOLLOW-THROUGH",
+    SwingPhase.FINISH: "FINISH",
+}
 
 
 def draw_swing_phase_label(
     frame: np.ndarray,
     phase: SwingPhase,
-    color: tuple[int, int, int] = DEFAULT_PHASE_COLOR,
-    font_scale: float = 1.0,
-    position: tuple[int, int] = (20, 40),
+    color: tuple[int, int, int] = WHITE,
+    font_scale: float = 0.7,
+    position: Optional[tuple[int, int]] = None,
     show_background: bool = True,
 ) -> np.ndarray:
-    """
-    Draw swing phase label on a video frame.
-    
-    Args:
-        frame: Input frame (will be modified in place).
-        phase: Current swing phase.
-        color: BGR color for text.
-        font_scale: Font size scale.
-        position: (x, y) position for label.
-        show_background: Whether to show semi-transparent background.
-    
-    Returns:
-        Frame with phase label.
-    """
-    # Phase display names
-    phase_names = {
-        SwingPhase.IDLE: "IDLE",
-        SwingPhase.ADDRESS: "ADDRESS",
-        SwingPhase.BACKSWING: "BACKSWING",
-        SwingPhase.TOP: "TOP",
-        SwingPhase.DOWNSWING: "DOWNSWING",
-        SwingPhase.IMPACT: "IMPACT",
-        SwingPhase.FOLLOW_THROUGH: "FOLLOW-THROUGH",
-        SwingPhase.FINISH: "FINISH",
-    }
-    
-    # Phase colors (BGR)
-    phase_colors = {
-        SwingPhase.IDLE: (128, 128, 128),
-        SwingPhase.ADDRESS: (255, 200, 0),
-        SwingPhase.BACKSWING: (0, 255, 255),
-        SwingPhase.TOP: (0, 200, 255),
-        SwingPhase.DOWNSWING: (0, 128, 255),
-        SwingPhase.IMPACT: (0, 255, 0),
-        SwingPhase.FOLLOW_THROUGH: (255, 128, 0),
-        SwingPhase.FINISH: (255, 0, 128),
-    }
-    
-    label = phase_names.get(phase, "UNKNOWN")
-    label_color = phase_colors.get(phase, color)
-    
+    label = PHASE_NAMES.get(phase, "UNKNOWN")
     font = cv2.FONT_HERSHEY_SIMPLEX
     thickness = 2
-    
-    # Get text size
+
     (text_w, text_h), baseline = cv2.getTextSize(label, font, font_scale, thickness)
-    
+    if position is None:
+        # Top-center keeps the badge (top-left) and HUD (top-right) clear.
+        frame_h, frame_w = frame.shape[:2]
+        position = ((frame_w - text_w) // 2, text_h + 24)
     x, y = position
-    
-    # Draw background
+
     if show_background:
         padding = 10
         cv2.rectangle(
             frame,
             (x - padding, y - text_h - padding),
             (x + text_w + padding, y + baseline + padding),
-            (0, 0, 0),
+            HUD_BG,
             -1,
         )
-        # Semi-transparent overlay
-        overlay = frame.copy()
         cv2.rectangle(
-            overlay,
+            frame,
             (x - padding, y - text_h - padding),
             (x + text_w + padding, y + baseline + padding),
-            label_color,
-            2,
+            PURPLE,
+            1,
+            cv2.LINE_AA,
         )
-        cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
-    
-    # Draw text
-    cv2.putText(frame, label, (x, y), font, font_scale, label_color, thickness, cv2.LINE_AA)
-    
+
+    cv2.putText(frame, label, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
     return frame
 
 
 def draw_impact_marker(
     frame: np.ndarray,
     is_impact: bool,
-    color: tuple[int, int, int] = (0, 255, 0),
+    color: tuple[int, int, int] = GREEN,
     radius: int = 30,
     position: Optional[tuple[int, int]] = None,
 ) -> np.ndarray:
-    """
-    Draw impact indicator on frame (visual flash/circle).
-    
-    Args:
-        frame: Input frame (will be modified in place).
-        is_impact: Whether this is an impact frame.
-        color: BGR color for impact indicator.
-        radius: Radius of impact circle.
-        position: Position for indicator (None = center of frame).
-    
-    Returns:
-        Frame with impact indicator.
-    """
     if not is_impact:
         return frame
-    
+
     h, w = frame.shape[:2]
-    
     if position is None:
         position = (w // 2, h // 2)
-    
-    # Draw pulsing circle effect
+
     cv2.circle(frame, position, radius, color, 3, cv2.LINE_AA)
     cv2.circle(frame, position, radius - 10, color, 2, cv2.LINE_AA)
-    
-    # Add glow effect
+
     overlay = frame.copy()
     cv2.circle(overlay, position, radius + 20, color, -1)
     cv2.addWeighted(overlay, 0.1, frame, 0.9, 0, frame)
-    
     return frame
 
 
 def draw_timestamp(
     frame: np.ndarray,
     timestamp: float,
-    color: tuple[int, int, int] = (255, 255, 255),
-    font_scale: float = 0.6,
+    color: tuple[int, int, int] = WHITE,
+    font_scale: float = 0.5,
     position: str = "top_right",
 ) -> np.ndarray:
-    """
-    Draw timestamp on video frame.
-    
-    Args:
-        frame: Input frame.
-        timestamp: Time in seconds.
-        color: BGR color for text.
-        font_scale: Font scale.
-        position: "top_left", "top_right", "bottom_left", "bottom_right".
-    
-    Returns:
-        Frame with timestamp.
-    """
     h, w = frame.shape[:2]
-    
-    # Format timestamp
     minutes = int(timestamp // 60)
     seconds = int(timestamp % 60)
     ms = int((timestamp % 1) * 100)
     text = f"{minutes:02d}:{seconds:02d}.{ms:02d}"
-    
+
     font = cv2.FONT_HERSHEY_SIMPLEX
     thickness = 1
-    
     (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale, thickness)
-    
     padding = 10
-    
+
     if position == "top_left":
         x, y = padding, text_h + padding
     elif position == "top_right":
         x, y = w - text_w - padding, text_h + padding
     elif position == "bottom_left":
         x, y = padding, h - padding
-    else:  # bottom_right
+    else:
         x, y = w - text_w - padding, h - padding
-    
-    # Draw background
+
     cv2.rectangle(
-        frame,
-        (x - 5, y - text_h - 5),
-        (x + text_w + 5, y + 5),
-        (0, 0, 0),
-        -1,
+        frame, (x - 5, y - text_h - 5), (x + text_w + 5, y + 5),
+        HUD_BG, -1,
     )
-    
     cv2.putText(frame, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
-    
     return frame
 
 
-def draw_confidence_bar(
+def draw_pose_skeleton(
     frame: np.ndarray,
-    confidence: float,
-    label: str = "Confidence",
-    position: tuple[int, int] = (20, 80),
-    width: int = 150,
-    height: int = 15,
+    pose: FramePose,
+    color: tuple[int, int, int] = PURPLE,
+    landmark_color: Optional[tuple[int, int, int]] = None,
+    thickness: int = 2,
+    landmark_radius: int = 4,
+    min_visibility: float = 0.5,
+    golf_mode: bool = True,
 ) -> np.ndarray:
+    """Lightweight skeleton draw for callers that don't need glow/trails.
+
+    Kept for backward compatibility. New code should use `SkeletonRenderer`.
     """
-    Draw a confidence bar on the frame.
-    
-    Args:
-        frame: Input frame.
-        confidence: Confidence value (0-1).
-        label: Label text.
-        position: (x, y) position.
-        width: Bar width.
-        height: Bar height.
-    
-    Returns:
-        Frame with confidence bar.
-    """
-    x, y = position
-    
-    # Background
-    cv2.rectangle(frame, (x, y), (x + width, y + height), (50, 50, 50), -1)
-    
-    # Fill based on confidence
-    fill_width = int(width * min(1.0, max(0.0, confidence)))
-    
-    # Color gradient (red -> yellow -> green)
-    if confidence < 0.5:
-        color = (0, int(255 * confidence * 2), 255)
-    else:
-        color = (0, 255, int(255 * (1 - confidence) * 2))
-    
-    cv2.rectangle(frame, (x, y), (x + fill_width, y + height), color, -1)
-    
-    # Border
-    cv2.rectangle(frame, (x, y), (x + width, y + height), (200, 200, 200), 1)
-    
-    # Label
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    label_text = f"{label}: {confidence:.0%}"
-    cv2.putText(frame, label_text, (x, y - 5), font, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
-    
+    if not pose.is_valid:
+        return frame
+
+    h, w = frame.shape[:2]
+    landmark_color = landmark_color or color
+    connections = BONES if golf_mode else POSE_CONNECTIONS
+
+    for start_idx, end_idx in connections:
+        if start_idx >= len(pose.landmarks) or end_idx >= len(pose.landmarks):
+            continue
+        s, e = pose.landmarks[start_idx], pose.landmarks[end_idx]
+        if s.visibility < min_visibility or e.visibility < min_visibility:
+            continue
+        cv2.line(frame, s.to_pixel(w, h), e.to_pixel(w, h), color, thickness, cv2.LINE_AA)
+
+    for lm in pose.landmarks:
+        if lm.visibility < min_visibility:
+            continue
+        cv2.circle(frame, lm.to_pixel(w, h), landmark_radius, landmark_color, -1, cv2.LINE_AA)
+
     return frame

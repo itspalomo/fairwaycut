@@ -44,6 +44,41 @@ def main():
     pass
 
 
+OVERLAY_COMPONENTS = ("pose", "hud", "waveform", "timestamp")
+
+
+def _parse_overlay_components(value: Optional[str]) -> Optional[set[str]]:
+    """Parse the value of --with-overlays.
+
+    Returns None when overlays are disabled (flag not passed). Returns a set
+    of component names otherwise. "all" expands to every component; "none"
+    is treated as disabled.
+    """
+    if value is None:
+        return None
+    value = value.strip().lower()
+    if value in ("", "all"):
+        return set(OVERLAY_COMPONENTS)
+    if value == "none":
+        return None
+    components: set[str] = set()
+    for raw in value.split(","):
+        name = raw.strip().lower()
+        if not name:
+            continue
+        if name == "all":
+            return set(OVERLAY_COMPONENTS)
+        if name not in OVERLAY_COMPONENTS:
+            raise click.BadParameter(
+                f"Unknown overlay component '{name}'. Choose from: "
+                f"{', '.join(OVERLAY_COMPONENTS)}, all, none."
+            )
+        components.add(name)
+    if not components:
+        return None
+    return components
+
+
 def _print_pose_backend_summary(parameters: dict) -> None:
     """Print the selected pose backend when pose estimation was used."""
     backend = parameters.get("pose_backend")
@@ -58,6 +93,28 @@ def _print_pose_backend_summary(parameters: dict) -> None:
     recommendation = parameters.get("pose_backend_recommendation")
     if recommendation:
         console.print(recommendation, style="yellow")
+
+
+def _print_rejection_summary(parameters: dict) -> None:
+    """Show how many audio candidates the swing-motion gate dropped."""
+    rejections = parameters.get("rejections") or {}
+    if not rejections:
+        return
+    total = sum(rejections.values())
+    if total <= 0:
+        return
+    console.print(f"🛑 Filtered out [bold red]{total}[/bold red] non-swing candidates:")
+    label_map = {
+        "no_pose_data": "missing pose data in segment",
+        "incomplete_swing_phases": "incomplete swing phases",
+        "audio_confidence_below_floor": "audio confidence below floor",
+    }
+    for reason, count in sorted(rejections.items(), key=lambda kv: -kv[1]):
+        if reason.startswith("wrist_speed_below_threshold"):
+            label = "wrist speed below threshold"
+        else:
+            label = label_map.get(reason, reason)
+        console.print(f"   • {label}: [cyan]{count}[/cyan]")
 
 
 @main.command()
@@ -187,6 +244,7 @@ def analyze(
         console.print()
         console.print(f"🎯 Found [bold green]{len(result.swings)}[/bold green] swings")
         _print_pose_backend_summary(result.parameters)
+        _print_rejection_summary(result.parameters)
         
         # Print swing summary
         if result.swings:
@@ -319,7 +377,18 @@ def analyze(
 @click.option("--end", "-e", type=float, default=None, show_default="video end", help="End time in seconds")
 @click.option("--pre-impact", type=float, default=3.0, show_default=True, help="Seconds before impact to include in clip")
 @click.option("--post-impact", type=float, default=2.0, show_default=True, help="Seconds after impact to include in clip")
-@click.option("--with-overlays/--no-overlays", default=False, show_default=True, help="Add visual overlays to clips")
+@click.option(
+    "--with-overlays",
+    type=str,
+    default=None,
+    show_default=False,
+    metavar="COMPONENTS",
+    help=(
+        "Render overlays on extracted clips. Pass 'all' for the full set or a "
+        "comma-separated list of components: pose, hud, waveform, phase, timestamp, impact. "
+        "Examples: --with-overlays all  /  --with-overlays pose,hud  /  --with-overlays pose,waveform"
+    ),
+)
 @click.option("--export-3d/--no-export-3d", default=False, show_default=True, help="Export interactive 3D viewer for each swing")
 @click.option("--verbose", "-v", is_flag=True, show_default=True, help="Verbose output")
 def extract(
@@ -330,26 +399,36 @@ def extract(
     end: Optional[float],
     pre_impact: float,
     post_impact: float,
-    with_overlays: bool,
+    with_overlays: Optional[str],
     export_3d: bool,
     verbose: bool,
 ):
     """
     Extract individual swing clips from a video.
-    
+
     Detects swings and saves each as a separate video file.
-    
+
     \b
     Modes:
       audio  - Audio detection only (fastest, no skeleton overlay)
       hybrid - Audio + pose around impacts (recommended for overlays)
       lite   - Full video pose with lite model
       full   - Full video pose with full model
-    
-      fairwaycut extract video.mp4                        # Quick extraction
-      fairwaycut extract video.mp4 --with-overlays -m hybrid  # With skeleton
-      fairwaycut extract video.mp4 --export-3d            # With interactive 3D export
-      fairwaycut extract video.mp4 -s 60 -e 180           # Only 1:00-3:00
+
+    \b
+    Overlay components (use with --with-overlays):
+      pose       - skeleton (purple bones, green wrists, glow, trail)
+      hud        - wrist-speed readout + sparkline + MediaPipe badge
+      waveform   - audio waveform strip below the frame
+      timestamp  - elapsed-time readout
+
+    \b
+      fairwaycut extract video.mp4                              # Plain clips
+      fairwaycut extract video.mp4 --with-overlays              # Full overlay set
+      fairwaycut extract video.mp4 --with-overlays pose,hud     # Pose + HUD only
+      fairwaycut extract video.mp4 -m hybrid --with-overlays    # Recommended
+      fairwaycut extract video.mp4 --export-3d                  # Interactive 3D
+      fairwaycut extract video.mp4 -s 60 -e 180                 # Range 1:00-3:00
     """
     from fairwaycut.core.config import ProcessingMode
     
@@ -391,7 +470,10 @@ def extract(
     config = Config.default()
     config.fusion.pre_impact_sec = pre_impact
     config.fusion.post_impact_sec = post_impact
-    
+
+    overlay_components = _parse_overlay_components(with_overlays)
+    overlays_enabled = overlay_components is not None
+
     # Progress display using Rich
     handler = RichProgressHandler(console, verbose=verbose)
 
@@ -399,11 +481,11 @@ def extract(
         # Step 1: Detect swings
         mode_desc = {"audio": "audio", "hybrid": "hybrid", "lite": "lite", "full": "full"}
         shared_audio = None
-        
+
         with handler.live() as h:
              h.console.print(f"🔍 Detecting swings (mode: {mode_desc[mode]})...")
 
-             if with_overlays:
+             if overlays_enabled:
                 h.callback("audio_extraction", 0, 1)
                 shared_audio = extract_audio_from_video(
                     video_path,
@@ -421,25 +503,29 @@ def extract(
                 progress_callback=h.callback,
                 audio=shared_audio,
             )
-        
+
         console.print(f"🎯 Found [bold green]{len(result.swings)}[/bold green] swings")
         _print_pose_backend_summary(result.parameters)
-        
+        _print_rejection_summary(result.parameters)
+
         if not result.swings:
             console.print("No swings detected. Try adjusting parameters.", style="yellow")
             return
-        
+
         # Step 2: Extract clips
         console.print("✂️ Extracting clips...")
-        
-        if with_overlays:
-            # Use overlay generator for clips
+
+        if overlays_enabled:
             from fairwaycut.video.generator import generate_all_swing_clips, DemoVideoOptions
-            
+
             options = DemoVideoOptions(
-                show_skeleton=True,
-                show_waveform=True,
-                show_phase_label=True,
+                show_skeleton="pose" in overlay_components,
+                show_hud="hud" in overlay_components,
+                show_waveform="waveform" in overlay_components,
+                show_timestamp="timestamp" in overlay_components,
+            )
+            console.print(
+                f"🎨 Overlays: [cyan]{', '.join(sorted(overlay_components))}[/cyan]"
             )
             
             from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn

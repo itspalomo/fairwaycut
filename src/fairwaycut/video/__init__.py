@@ -11,12 +11,9 @@ from fairwaycut.video.overlays import (
     draw_audio_waveform,
     draw_swing_phase_label,
     draw_impact_marker,
-    # Enhanced skeleton rendering
+    draw_pose_hud,
     SkeletonRenderer,
     SkeletonRendererOptions,
-    RenderMode,
-    ColorTheme,
-    PoseHistory,
 )
 from fairwaycut.video.generator import (
     DemoVideoGenerator,
@@ -30,17 +27,14 @@ __all__ = [
     "extract_video_clip",
     "get_video_info",
     "VideoInfo",
-    # Basic overlays
+    # Overlays
     "draw_pose_skeleton",
     "draw_audio_waveform",
     "draw_swing_phase_label",
     "draw_impact_marker",
-    # Enhanced skeleton rendering
+    "draw_pose_hud",
     "SkeletonRenderer",
     "SkeletonRendererOptions",
-    "RenderMode",
-    "ColorTheme",
-    "PoseHistory",
     # Video generation
     "DemoVideoGenerator",
     "DemoVideoOptions",

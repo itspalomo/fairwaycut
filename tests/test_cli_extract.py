@@ -55,7 +55,7 @@ def test_extract_with_overlays_decodes_audio_once(monkeypatch, tmp_path):
     monkeypatch.setattr("fairwaycut.video.generator.generate_all_swing_clips", fake_generate_all_swing_clips)
 
     runner = CliRunner()
-    result = runner.invoke(cli_module.main, ["extract", str(video_path), "--with-overlays"])
+    result = runner.invoke(cli_module.main, ["extract", str(video_path), "--with-overlays", "all"])
 
     assert result.exit_code == 0
     assert len(audio_calls) == 1
