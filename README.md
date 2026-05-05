@@ -14,7 +14,7 @@ FairwayCut is a local, offline command-line tool designed for golfers and develo
 
 ![Swing overlay demo](docs/assets/after_overlay.gif)
 
-Before (raw range video) vs after (auto-cut clip with skeleton, waveform, and phase labels):
+Before (raw range video) vs after (auto-cut clip with skeleton, frosted-glass wrist-speed HUD with live sparkline, and audio waveform):
 
 | Raw capture | Auto-cut clip |
 | --- | --- |
@@ -59,12 +59,11 @@ uv run fairwaycut extract input_video.mov --export-3d
 - **Local & Privacy-Focused**: Runs entirely on your machine. No cloud uploads.
 - **Deterministic by design**: Same input + same settings = the same clips every time.
 - **Multi-modal detection**:
-    - **Audio (transient + adaptive SNR)** for quick candidate impacts.
-    - **Pose (MediaPipe / Apple Vision)** for swing phase validation.
-    - **Fusion** to combine the two and filter false positives.
+    - **Audio (transient + adaptive SNR)** finds candidate impacts.
+    - **Pose (MediaPipe / Apple Vision)** validates each candidate as a binary gate — a candidate is dropped if its segment doesn't show a real swing-motion pattern.
 - **Flexible modes**:
-    - `audio` (fastest), `hybrid` (audio + targeted pose), `lite` (full video, lite pose), `full` (full video, high-accuracy pose).
-- **Overlay visualizations**: Add pose skeletons, audio waveforms, and swing phase labels to exported clips.
+    - `audio` (fastest), `hybrid` (audio + targeted pose validator, recommended), `lite` (full video, lite pose), `full` (full video, high-accuracy pose).
+- **Overlay visualizations**: pose skeleton (purple bones, neon-green wrists with a fading trail), liquid-glass wrist-speed HUD with a live sparkline, and audio waveform strip — pick any combination per clip.
 
 ## Installation
 
@@ -95,8 +94,13 @@ Other platforms continue to use MediaPipe automatically.
 
 2.  **Export overlay clips** (spot-check detections visually).
     ```bash
-    uv run fairwaycut extract input_video.mov --with-overlays --mode hybrid
+    # Render every overlay component
+    uv run fairwaycut extract input_video.mov --mode hybrid --with-overlays all
+
+    # Or pick a subset
+    uv run fairwaycut extract input_video.mov --mode hybrid --with-overlays pose,hud
     ```
+    Components: `pose`, `hud`, `waveform`, `timestamp` (or `all`).
 
 3.  **View Help**:
     ```bash
@@ -112,8 +116,13 @@ Detects swings and saves them as individual video files.
 fairwaycut extract <VIDEO_PATH> [OPTIONS]
 ```
 - `--mode`: `audio` (fast), `hybrid` (accurate), `lite`, or `full`.
-- `--pre-impact`: Seconds to include before impact (default: 2.5).
-- `--post-impact`: Seconds to include after impact (default: 1.0).
+- `--pre-impact`: Seconds to include before impact (default: 3.0).
+- `--post-impact`: Seconds to include after impact (default: 2.0).
+- `--with-overlays`: Comma-separated overlay components or `all`. Choices:
+    - `pose` — purple skeleton with neon-green wrists and fading trail
+    - `hud` — frosted-glass wrist-speed panel (current + peak m/s + sparkline) and the MediaPipe Pose badge
+    - `waveform` — audio waveform strip below the frame
+    - `timestamp` — elapsed-time readout
 
 ### `analyze`
 Detects swings and prints a text report without saving videos. Good for testing parameters.
@@ -132,8 +141,8 @@ fairwaycut plot <VIDEO_PATH>
 ## How It Works (High Level)
 
 - **Audio transient analysis**: We measure spectral flux + onset strength and gate peaks using adaptive, local SNR. This catches the sharp “crack” of impact while ignoring crowd noise, music, or HVAC hum.
-- **Pose validation**: Around each candidate impact we run MediaPipe (or Apple Vision on macOS) to confirm a swing pattern and estimate swing phases.
-- **Fusion**: Audio confidence and pose confidence are weighted to keep true swings and drop false positives; configurable pre/post impact windows define the exported clips.
+- **Pose-as-validator (hybrid mode)**: Around each audio candidate we run MediaPipe (or Apple Vision on macOS) and ask one binary question — *did a real swing actually happen here?* The answer is based on peak wrist speed and the presence of the backswing/downswing/impact phase pattern. Pose does **not** weight or boost the candidate's score; it can only veto it.
+- **Audio-confidence floor**: Surviving candidates also have to clear a minimum audio confidence so loud non-impact sounds (claps, ball bounces, dropped clubs) don't sneak through on incidental motion.
 - **Determinism**: Fixed seeds, stable thresholds, and ordered fusion rules guarantee repeatable results.
 
 For deeper details, see `docs/ARCHITECTURE.md`.
