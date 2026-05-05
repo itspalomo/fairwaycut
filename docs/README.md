@@ -32,7 +32,7 @@ To serve at `https://fairwaycut.app/`, add a `CNAME` file containing `fairwaycut
 Identifying details currently in use:
 
 - DBA: **itsPalomo**
-- Governing law: **California**, venue **Los Angeles County**
+- Governing law: **California**, venue **Santa Clara County** (Palo Alto)
 - Contact email: **itspalomo.dev@gmail.com** (placeholder; rotate to a dedicated address before broad distribution)
 
 Update the effective date when publishing material changes.
