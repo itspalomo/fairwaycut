@@ -2,7 +2,7 @@
 
 This directory is the source for the public legal pages of the FairwayCut iOS app, served via GitHub Pages.
 
-It is intentionally separate from the open-source command-line tool in `src/` and contains only static HTML and CSS — no application source.
+It is intentionally separate from the open-source command-line tool in `src/` and contains only static HTML and CSS — no application source. These legal pages apply to the iOS app only. The CLI remains governed by the repository's MIT License.
 
 ## Layout
 
